@@ -163,11 +163,15 @@ const handleWebSocketConnection = (ws, req) => {
         await safeSendAudioResponse(greeting);
     };
 
-    // Detect emergency
+    // EMERGENCY NOTIFICATION FIX - Enhanced version
     const checkForEmergency = async (transcript) => {
         const lowered = transcript.toLowerCase();
-        if (lowered.includes("urgent") || lowered.includes("emergency") || lowered.includes("asap")) {
-            console.log("🚨 Emergency detected in transcript!");
+        const emergencyKeywords = ["urgent", "emergency", "asap", "help", "911", "accident", "danger"];
+        
+        const isEmergency = emergencyKeywords.some(keyword => lowered.includes(keyword));
+        
+        if (isEmergency) {
+            console.log("🚨 EMERGENCY DETECTED in transcript:", transcript);
             
             if (!conversationState.user) {
                 console.error("❌ Cannot send emergency alert: No user data available");
@@ -180,24 +184,44 @@ const handleWebSocketConnection = (ws, req) => {
                     userId: conversationState.user._id 
                 });
                 
-                console.log('🔍 Looking for FCM token for user:', conversationState.user._id);
-                console.log('UserSettings found:', userSettings ? 'Yes' : 'No');
-                console.log('FCM Token available:', userSettings?.fcmToken ? 'Yes' : 'No');
+                console.log('🔍 Emergency check - User ID:', conversationState.user._id);
+                console.log('🔍 UserSettings found:', userSettings ? 'Yes' : 'No');
+                console.log('🔍 FCM Token available:', userSettings?.fcmToken ? 'Yes' : 'No');
                 
                 if (userSettings?.fcmToken) {
-                    await sendEmergencyAlert(userSettings.fcmToken, {
-                        title: "🚨 Urgent Call Alert",
-                        body: `Urgent situation detected from caller: "${transcript}"`,
+                    console.log('📱 Sending emergency notification to FCM token:', userSettings.fcmToken);
+                    
+                    const notificationData = {
+                        title: "🚨 URGENT CALL ALERT",
+                        body: `Emergency detected in call from ${conversationState.callLog.callerNumber}: "${transcript}"`,
                         priority: "high",
-                    });
-                    console.log("✅ Emergency notification sent.");
-                    await safeSendAudioResponse("I understand this is urgent. I am notifying them immediately.");
+                        callSid: conversationState.callSid,
+                        callerNumber: conversationState.callLog.callerNumber,
+                        timestamp: new Date().toISOString()
+                    };
+                    
+                    // Send emergency notification
+                    const notificationResult = await sendEmergencyAlert(
+                        userSettings.fcmToken, 
+                        notificationData
+                    );
+                    
+                    console.log("✅ Emergency notification sent successfully:", notificationResult);
+                    
+                    // Also send audio response to caller
+                    await safeSendAudioResponse("I understand this is an emergency. I have immediately notified the person and help is on the way.");
+                    
                 } else {
-                    console.warn("⚠️ No FCM token found for user:", conversationState.user._id);
-                    await safeSendAudioResponse("I understand this is urgent. Let me try to reach them for you.");
+                    console.warn("⚠️ No FCM token found for user. Cannot send push notification.");
+                    console.warn("User ID:", conversationState.user._id);
+                    
+                    // Fallback: Still respond to the caller
+                    await safeSendAudioResponse("I understand this is an emergency. Let me try to reach them immediately.");
                 }
             } catch (err) {
-                console.error("❌ Failed to send emergency alert:", err);
+                console.error("❌ FAILED to send emergency alert:", err);
+                // Even if notification fails, respond to the caller
+                await safeSendAudioResponse("I understand this is urgent. I'm here to help you.");
             }
         }
     };
@@ -220,7 +244,7 @@ const handleWebSocketConnection = (ws, req) => {
         conversationState.responseQueue = [];
 
         try {
-            // 1️⃣ Emergency Detection
+            // 1️⃣ Emergency Detection - THIS HAPPENS FIRST
             await checkForEmergency(transcript);
 
             // 2️⃣ Detect caller role if not set
@@ -244,7 +268,7 @@ const handleWebSocketConnection = (ws, req) => {
 
                 console.log(`[CONVERSATION] Intent: ${aiResponse.intent}, Stage: ${aiResponse.stage}`);
 
-                // 6️⃣ Save transcripts to MongoDB - FIXED VERSION
+                // 6️⃣ Save transcripts to MongoDB
                 if (conversationState.callSid) {
                     await saveTranscriptToMongo(conversationState.callSid, transcript, 'user');
                     if (aiResponse.response_text) {
