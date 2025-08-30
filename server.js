@@ -7,6 +7,9 @@ const connectDB = require('./config/db');
 // We only need the one handler function now
 const { handleWebSocketConnection } = require('./controllers/twilioController');
 
+// Import the status route registration
+const { registerStatusRoute } = require('./routes/twilioStatusRoute');
+
 dotenv.config();
 connectDB(); // Keeping DB connection for other potential API routes
 
@@ -24,6 +27,9 @@ app.use('/api/twilio', require('./routes/twilioRoutes')); // This handles the in
 app.use('/api/contacts', require('./routes/contactRoutes'));
 app.use('/api/logs', require('./routes/callLogRoutes'));
 app.use('/api/settings', require('./routes/userSettingsRoutes'));
+
+// Register Twilio status callback route
+registerStatusRoute(app);
 
 app.get('/', (req, res) => {
     res.send('AI Assistant Backend is running!');
