@@ -20,9 +20,10 @@ class SttService extends EventEmitter {
   initConnection() {
     // Create connection with optimized settings for conversation
     this.connection = this.deepgram.listen.live({
-      model: 'nova-2',
+      model: 'nova-3',
       smart_format: true,
       encoding: 'mulaw',
+      language: 'multi',
       sample_rate: 8000,
       interim_results: true, // Keep this for responsiveness
       endpointing: 300, // Wait 300ms after speech ends

@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -6,6 +7,8 @@ const cors = require('cors');
 const connectDB = require('./config/db');
 // We only need the one handler function now
 const { handleWebSocketConnection } = require('./controllers/twilioController');
+
+
 
 dotenv.config();
 connectDB(); // Keeping DB connection for other potential API routes
