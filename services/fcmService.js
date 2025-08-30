@@ -1,47 +1,31 @@
-const admin = require('firebase-admin');
+// services/fcmService.js
+const admin = require("firebase-admin");
 
-// Ensure Firebase is initialized
-if (!admin.apps.length) {
-    const serviceAccount = require('../config/firebase-service-account.json');
-    admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-    });
-}
-
-const sendEmergencyAlert = async (fcmToken, message) => {
-    const payload = {
-        token: fcmToken,
-        notification: {
-            title: '🚨 URGENT ALERT!',
-            body: `An emergency was detected in a call. Message: "${message}"`,
-        },
-        android: {
-            priority: 'high',
-            notification: {
-                sound: 'default',
-                channel_id: 'emergency_channel', 
-            }
-        },
-        apns: {
-            payload: {
-                aps: {
-                    sound: 'default',
-                    badge: 1,
-                }
-            }
-        },
-        data: {
-            type: 'emergency_alert',
-        }
+const sendEmergencyAlert = async (fcmToken, data) => {
+  try {
+    const message = {
+      token: fcmToken,
+      data: {
+        type: "emergency_alert",   // 👈 must be "data" only (not "notification")
+        title: data.title,
+        body: data.body,
+        callSid: data.callSid,
+        callerNumber: data.callerNumber,
+        timestamp: data.timestamp,
+      },
+      android: {
+        priority: "high",
+        ttl: 0,  // deliver immediately
+      }
     };
 
-    try {
-        console.log(`Sending FCM notification to token: ${fcmToken}`);
-        const response = await admin.messaging().send(payload);
-        console.log('Successfully sent message:', response);
-    } catch (error) {
-        console.error('Error sending FCM message:', error);
-    }
+    const response = await admin.messaging().send(message);
+    console.log("📲 Emergency FCM sent:", response);
+    return response;
+  } catch (error) {
+    console.error("❌ Error sending FCM:", error);
+    throw error;
+  }
 };
 
-module.exports = { sendEmergencyAlert };
+module.exports = { sendEmergencyAlert };  // ✅ Correct export
