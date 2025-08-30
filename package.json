@@ -22,10 +22,12 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "firebase-admin": "^13.5.0",
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.19.0",
     "mongoose": "^8.18.0",
     "nodemon": "^3.1.10",
-    "twilio": "^5.8.2"
+    "twilio": "^5.8.2",
+    "ws": "^8.18.3"
   }
 }
