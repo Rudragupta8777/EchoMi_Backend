@@ -16,6 +16,30 @@ const rolePrompts = {
     unknown: "You are an AI assistant for speaking with an unknown caller..."
 };
 
+
+const saveTranscriptToMongo = async (callSid, newMessage, role) => {
+    try {
+        await CallLog.findOneAndUpdate(
+            { callSid },  // match the existing call by callSid
+            {
+                $push: { 
+                    transcript: { 
+                        speaker: role === 'user' ? 'caller' : 'ai',
+                        text: newMessage,
+                        timestamp: new Date()
+                    }
+                }
+            },
+            { new: true } // do not upsert, only update existing call
+        );
+        console.log('✅ Transcript saved to MongoDB.');
+    } catch (err) {
+        console.error('❌ Failed to save transcript to MongoDB:', err);
+    }
+};
+
+
+
 // Handle incoming Twilio call
 const handleIncomingCall = async (req, res) => {
     try {
@@ -61,7 +85,7 @@ const handleWebSocketConnection = (ws, req) => {
 
     const params = url.parse(req.url, true).query;
     const twilioToNumber = params.to;
-    const callId = params.callSid;
+    const callSid = params.callSid;
 
     const conversationState = {
         sttService: null,
@@ -75,6 +99,8 @@ const handleWebSocketConnection = (ws, req) => {
         aiResponded: false,
     };
 
+
+    
     // Fetch user's name dynamically from Firestore
     const getUserName = async () => {
         try {
@@ -123,55 +149,77 @@ const handleWebSocketConnection = (ws, req) => {
 
         conversationState.responseQueue.push(transcript);
         await processResponseQueue();
-    };
+
+       
+    }
 
     // Process queue
-    const processResponseQueue = async () => {
-        if (conversationState.isProcessingResponse || conversationState.responseQueue.length === 0) return;
-        conversationState.isProcessingResponse = true;
+const processResponseQueue = async () => {
+    if (conversationState.isProcessingResponse || conversationState.responseQueue.length === 0) return;
+    conversationState.isProcessingResponse = true;
 
-        const transcript = conversationState.responseQueue.pop();
-        conversationState.responseQueue = [];
+    const transcript = conversationState.responseQueue.shift(); // get oldest transcript
+    conversationState.responseQueue = [];
 
-        try {
-            await checkForEmergency(transcript);
+    try {
+        // 1️⃣ Emergency Detection
+        await checkForEmergency(transcript);
 
-            if (!conversationState.callerRole) {
-                conversationState.callerRole = detectCallerRole(transcript);
-                console.log(`[System]: Identified role as '${conversationState.callerRole}'`);
+        // 2️⃣ Detect caller role if not set
+        if (!conversationState.callerRole) {
+            conversationState.callerRole = detectCallerRole(transcript);
+            console.log(`[System]: Identified role as '${conversationState.callerRole}'`);
+        }
+
+        // 3️⃣ Generate AI response
+        const aiResponse = await generateAIResponse(transcript);
+
+        if (aiResponse) {
+            // 4️⃣ Send AI audio response
+            if (aiResponse.response_text) {
+                await safeSendAudioResponse(aiResponse.response_text);
             }
 
-            const aiResponse = await generateAIResponse(transcript);
+            // 5️⃣ Update conversation state
+            conversationState.chatHistory = aiResponse.updated_history || conversationState.chatHistory;
+            conversationState.conversation_stage = aiResponse.stage || conversationState.conversation_stage;
 
-            if (aiResponse) {
-                await safeSendAudioResponse(aiResponse.response_text);
-                conversationState.chatHistory = aiResponse.updated_history;
-                conversationState.conversation_stage = aiResponse.stage;
+            console.log(`[CONVERSATION] Intent: ${aiResponse.intent}, Stage: ${aiResponse.stage}`);
 
-                console.log(`[CONVERSATION] Intent: ${aiResponse.intent}, Stage: ${aiResponse.stage}`);
+            // 6️⃣ Save transcripts to MongoDB
+            await saveTranscriptToMongo(callSid, transcript, 'user');
+            if (aiResponse.response_text) {
+                await saveTranscriptToMongo(callSid, aiResponse.response_text, 'ai');
+            }
 
-                // Hang up if end_of_call
-                if (aiResponse.stage === 'end_of_call') {
-                    console.log('[AI] Stage reached: end_of_call → Hanging up call.');
+            // 7️⃣ Hang up logic if end_of_call
+            if (aiResponse.stage === 'end_of_call') {
+                console.log('[AI] Stage reached: end_of_call → Hanging up call.');
 
-                    // Update call log
-                    await CallLog.findOneAndUpdate({ callId }, {
+                await CallLog.findOneAndUpdate(
+                    { callSid },
+                    {
                         status: 'completed',
                         endTime: new Date(),
                         conversationHistory: conversationState.chatHistory
-                    });
+                    }
+                );
 
-                    ws.send(JSON.stringify({ action: 'hangup' }));
-                    setTimeout(() => ws.close(), 5000);
-                }
+                ws.send(JSON.stringify({ action: 'hangup' }));
+                setTimeout(() => ws.close(), 5000);
             }
-        } catch (error) {
-            console.error('Error processing response:', error);
-            await safeSendAudioResponse("Sorry, I'm having a little trouble right now. Could you repeat that?");
-        } finally {
-            setTimeout(() => { conversationState.isProcessingResponse = false; }, 1000);
         }
-    };
+
+    } catch (error) {
+        console.error('Error processing response:', error);
+        await safeSendAudioResponse("Sorry, I'm having a little trouble right now. Could you repeat that?");
+    } finally {
+        // Slight delay before resetting the flag
+        setTimeout(() => { conversationState.isProcessingResponse = false; }, 500);
+    }
+};
+
+
 
     const detectCallerRole = (transcript) => {
         const text = transcript.toLowerCase();
@@ -249,4 +297,19 @@ const handleWebSocketConnection = (ws, req) => {
     ws.on('error', (err) => { console.error('WebSocket error:', err); cleanup(); });
 };
 
-module.exports = { handleIncomingCall, handleWebSocketConnection };
+const handleSendNotification = async (req, res) => {
+    try {
+        const { user_phone, title, message, type } = req.body;
+        // Your logic to send a push notification...
+        const result = await sendPushNotification({
+            title,
+            body: message,
+            data: { type, approval_token: extractTokenFromMessage(message) }
+        });
+        res.json({ success: result });
+    } catch (error) {
+        console.error('Error sending notification:', error);
+        res.status(500).json({ success: false, error: 'Failed to send notification' });
+    }
+};
+module.exports = { handleIncomingCall, handleWebSocketConnection,  handleSendNotification };
