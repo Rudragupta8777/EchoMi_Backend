@@ -199,7 +199,7 @@ const handleWebSocketConnection = (ws, req) => {
   // Emergency detection
   const checkForEmergency = async (transcript) => {
     const lowered = transcript.toLowerCase();
-    const emergencyKeywords = ["urgent", "emergency", "asap", "help", "911", "accident", "danger"];
+    const emergencyKeywords = ["urgent", "emergency", "asap", "911", "accident", "danger"];
     
     const isEmergency = emergencyKeywords.some(keyword => lowered.includes(keyword));
     
