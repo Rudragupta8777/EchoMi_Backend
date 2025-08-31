@@ -414,6 +414,271 @@ const handleWebSocketConnection = (ws, req) => {
   });
 };
 
+async function saveConversationSummary(summaryData) {
+    // Example for MongoDB with Mongoose
+    const ConversationSummary = require('../models/ConversationSummary');
+    
+    try {
+        const summary = new ConversationSummary({
+            firebaseUid: summaryData.firebaseUid,
+            callId: summaryData.callId,
+            summary: summaryData.summary,
+            callDetails: summaryData.call_details,
+            conversationLength: summaryData.conversation_length,
+            callDuration: summaryData.call_duration,
+            timestamp: new Date(summaryData.timestamp),
+            callerRole: summaryData.caller_role || 'unknown'
+        });
+        
+        await summary.save();
+        console.log('✅ Conversation summary saved to database');
+        return summary;
+    } catch (error) {
+        console.error('❌ Error saving conversation summary:', error);
+        throw error;
+    }
+}
+
+router.post('/generate-summary', async (req, res) => {
+    try {
+        const {
+            firebaseUid,
+            callId,
+            conversationHistory,
+            collectedInfo,
+            callDuration,
+            callerRole
+        } = req.body;
+
+        // Validate required fields
+        if (!conversationHistory || !Array.isArray(conversationHistory)) {
+            return res.status(400).json({
+                success: false,
+                error: 'conversationHistory is required and must be an array'
+            });
+        }
+
+        // Call Python API to generate summary
+        const pythonResponse = await axios.post(
+            `${PYTHON_API_URL}/api/conversation-summary`,
+            {
+                history: conversationHistory,
+                collected_info: collectedInfo,
+                call_duration: callDuration
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${INTERNAL_API_KEY}`
+                },
+                timeout: 10000
+            }
+        );
+
+        if (!pythonResponse.data.success) {
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to generate summary from Python API',
+                details: pythonResponse.data.error
+            });
+        }
+
+        const summaryData = {
+            ...pythonResponse.data,
+            firebaseUid,
+            callId,
+            caller_role: callerRole
+        };
+
+        // Save to database
+        const savedSummary = await saveConversationSummary(summaryData);
+
+        // Send response to Android app
+        res.json({
+            success: true,
+            summary: pythonResponse.data.summary,
+            callDetails: pythonResponse.data.call_details,
+            conversationLength: pythonResponse.data.conversation_length,
+            callDuration: callDuration,
+            summaryId: savedSummary._id,
+            timestamp: pythonResponse.data.timestamp
+        });
+
+    } catch (error) {
+        console.error('❌ Error generating conversation summary:', error);
+        
+        if (error.code === 'ECONNREFUSED') {
+            return res.status(503).json({
+                success: false,
+                error: 'Python API is not available'
+            });
+        }
+
+        res.status(500).json({
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+router.get('/summaries/:firebaseUid', async (req, res) => {
+    try {
+        const { firebaseUid } = req.params;
+        const { limit = 20, offset = 0, callerRole } = req.query;
+
+        // Build query
+        const query = { firebaseUid };
+        if (callerRole) {
+            query.callerRole = callerRole;
+        }
+
+        const ConversationSummary = require('../models/ConversationSummary');
+        
+        const summaries = await ConversationSummary
+            .find(query)
+            .sort({ timestamp: -1 })
+            .limit(parseInt(limit))
+            .skip(parseInt(offset))
+            .lean();
+
+        const totalCount = await ConversationSummary.countDocuments(query);
+
+        res.json({
+            success: true,
+            summaries,
+            pagination: {
+                total: totalCount,
+                limit: parseInt(limit),
+                offset: parseInt(offset),
+                hasMore: (parseInt(offset) + parseInt(limit)) < totalCount
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error fetching conversation summaries:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to fetch conversation summaries'
+        });
+    }
+});
+
+/**
+ * Auto-generate summary when call ends
+ * This can be called from your existing call handling logic
+ */
+async function autoGenerateSummary(callData) {
+    try {
+        const {
+            firebaseUid,
+            callId,
+            conversationHistory,
+            collectedInfo,
+            callDuration,
+            callerRole
+        } = callData;
+
+        console.log(`🔄 Auto-generating summary for call ${callId}`);
+
+        const response = await axios.post(
+            `${PYTHON_API_URL}/api/conversation-summary`,
+            {
+                history: conversationHistory,
+                collected_info: collectedInfo,
+                call_duration: callDuration
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${INTERNAL_API_KEY}`
+                },
+                timeout: 10000
+            }
+        );
+
+        if (response.data.success) {
+            const summaryData = {
+                ...response.data,
+                firebaseUid,
+                callId,
+                caller_role: callerRole
+            };
+
+            await saveConversationSummary(summaryData);
+            console.log(`✅ Auto-summary generated for call ${callId}`);
+            
+            return response.data.summary;
+        } else {
+            console.error('❌ Failed to auto-generate summary:', response.data.error);
+            return null;
+        }
+
+    } catch (error) {
+        console.error('❌ Error in auto-generate summary:', error);
+        return null;
+    }
+}
+
+// Export the router and helper function
+module.exports = { router, autoGenerateSummary };
+
+// ==========================================
+// DATABASE MODEL EXAMPLE (MongoDB/Mongoose)
+// File: models/ConversationSummary.js
+// ==========================================
+
+const mongoose = require('mongoose');
+
+const conversationSummarySchema = new mongoose.Schema({
+    firebaseUid: {
+        type: String,
+        required: true,
+        index: true
+    },
+    callId: {
+        type: String,
+        required: true,
+        unique: true
+    },
+    summary: {
+        type: String,
+        required: true,
+        maxlength: 500
+    },
+    callDetails: {
+        company: String,
+        caller_name: String,
+        final_stage: String,
+        otp_provided: Boolean
+    },
+    conversationLength: {
+        type: Number,
+        min: 0
+    },
+    callDuration: {
+        type: Number, // in seconds
+        min: 0
+    },
+    callerRole: {
+        type: String,
+        enum: ['delivery', 'unknown', 'urgent'],
+        default: 'unknown'
+    },
+    timestamp: {
+        type: Date,
+        default: Date.now,
+        index: true
+    }
+}, {
+    timestamps: true
+});
+
+// Create indexes for better query performance
+conversationSummarySchema.index({ firebaseUid: 1, timestamp: -1 });
+conversationSummarySchema.index({ firebaseUid: 1, callerRole: 1 });
+
+module.exports = mongoose.model('ConversationSummary', conversationSummarySchema);
+
 // Status route to update call duration
 const registerStatusRoute = (app) => {
   app.post('/api/twilio/status', async (req, res) => {
