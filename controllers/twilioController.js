@@ -10,8 +10,6 @@ const { sendEmergencyAlert } = require('../services/fcmService');
 const url = require('url');
 const { translateText } = require('../services/translationService');
 
-
-
 // Role prompts
 const rolePrompts = {
   delivery: "You are an AI assistant for handling a delivery...",
@@ -20,24 +18,33 @@ const rolePrompts = {
 };
 
 const saveTranscriptToMongo = async (callSid, newMessage, role) => {
-  try {
-    await CallLog.findOneAndUpdate(
-      { callSid },
-      {
-        $push: {
-          transcript: {
-            speaker: role === 'user' ? 'caller' : 'ai',
-            text: newMessage,
-            timestamp: new Date()
-          }
+    if (!callSid) {
+        console.error('❌ Cannot save transcript: callSid is null or undefined.');
+        return;
+    }
+    try {
+        const result = await CallLog.findOneAndUpdate(
+            { callSid },
+            {
+                $push: {
+                    transcript: {
+                        speaker: role === 'user' ? 'caller' : 'ai',
+                        text: newMessage,
+                        timestamp: new Date()
+                    }
+                }
+            },
+            { new: true }
+        );
+        
+        if (result) {
+            console.log('✅ Transcript saved to MongoDB for callSid:', callSid);
+        } else {
+            console.error('❌ No CallLog found with callSid:', callSid);
         }
-      },
-      { new: true }
-    );
-    console.log('✅ Transcript saved to MongoDB.');
-  } catch (err) {
-    console.error('❌ Failed to save transcript to MongoDB:', err);
-  }
+    } catch (err) {
+        console.error('❌ Failed to save transcript to MongoDB:', err);
+    }
 };
 
 // Handle incoming Twilio call
@@ -84,10 +91,6 @@ const handleIncomingCall = async (req, res) => {
 const handleWebSocketConnection = (ws, req) => {
   console.log('New WebSocket connection established');
 
-  const params = url.parse(req.url, true).query;
-  const twilioToNumber = params.to;
-  const callSid = params.callSid;
-
   const conversationState = {
     sttService: null,
     chatHistory: [],
@@ -97,170 +100,73 @@ const handleWebSocketConnection = (ws, req) => {
     responseQueue: [],
     hasGreeted: false,
     conversation_stage: 'start',
-    language: undefined
+    language: undefined,
+    callSid: null,
+    user: null,
+    callLog: null,
   };
 
-  // Fetch user name
+  // Fetch user and call data using callSid
+  const initializeCallData = async (callSid) => {
+    try {
+      console.log('🔍 Looking up call data for callSid:', callSid);
+      
+      const callLog = await CallLog.findOne({ callSid });
+      if (!callLog) {
+        console.error('❌ No CallLog found for callSid:', callSid);
+        return false;
+      }
+      
+      const user = await User.findById(callLog.userId);
+      if (!user) {
+        console.error('❌ No User found for userId:', callLog.userId);
+        return false;
+      }
+      
+      conversationState.callSid = callSid;
+      conversationState.callLog = callLog;
+      conversationState.user = user;
+      
+      console.log('✅ Call data initialized:', {
+        callSid,
+        userId: user._id,
+        userName: user.name
+      });
+      
+      return true;
+    } catch (error) {
+      console.error('Error initializing call data:', error);
+      return false;
+    }
+  };
+    
+  // Fetch user's name dynamically
   const getUserName = async () => {
     try {
-      const user = await User.findOne({ twilioPhoneNumber: twilioToNumber });
-      return (user && user.name) ? user.name : 'Ruchit';
+      if (conversationState.user?.name) {
+        return conversationState.user.name;
+      }
+      return 'Assistant'; // fallback
     } catch (err) {
       console.error('Error fetching user name:', err);
-      return 'Ruchit';
+      return 'Assistant';
     }
   };
 
-  // Initial greeting
-  const sendInitialGreeting = async () => {
-    if (conversationState.hasGreeted) return;
-    conversationState.hasGreeted = true;
-
-    const userName = await getUserName();
-    const greeting = `Hi! This is ${userName}'s AI assistant. How can I help you today?`;
-    await enqueueTTS(greeting, 'en');
-  };
-
-  // Detect emergencies
-  const checkForEmergency = async (text) => {
-    if (!text) return;
-    const lowered = text.toLowerCase();
-    if (lowered.includes('urgent') || lowered.includes('emergency') || lowered.includes('asap')) {
-      console.log('🚨 Emergency detected in transcript!');
-      try {
-        await sendEmergencyAlert({
-          title: '🚨 Urgent Call Alert',
-          body: `Urgent situation detected from caller: "${text}"`,
-          priority: 'high'
-        });
-        await enqueueTTS('I understand this is urgent. I am notifying you immediately.', conversationState.language || 'en');
-      } catch (err) {
-        console.error('❌ Failed to send emergency alert:', err);
-      }
-    }
-  };
-
-  // Detect caller role
-  const detectCallerRole = (text) => {
-    const lower = (text || '').toLowerCase();
-    if (lower.includes('delivery') || lower.includes('package') || lower.includes('courier')) return 'delivery';
-    if (lower.includes('mom') || lower.includes('dad') || lower.includes('family') || lower.includes('brother') || lower.includes('sister')) return 'family';
-    return 'unknown';
-  };
-
-  // STT transcript handler
-  const onTranscript = async (transcriptObj) => {
-    const text = typeof transcriptObj === 'string' ? transcriptObj : (transcriptObj?.text || '');
-    console.log(`[Caller Said]: ${text}`);
-
-    if (!conversationState.language) {
-      conversationState.language = transcriptObj?.detected_language
-        ? transcriptObj.detected_language
-        : /[\u0900-\u097F]/.test(text)
-          ? 'hi'
-          : 'en';
-    }
-
-    if (!text) return;
-
-    conversationState.responseQueue.push(text);
-    processResponseQueue();
-  };
-
-  // Process response queue
-  const processResponseQueue = async () => {
-    if (conversationState.isProcessingResponse || conversationState.responseQueue.length === 0) return;
-    conversationState.isProcessingResponse = true;
-
-    const transcript = conversationState.responseQueue.shift();
-    conversationState.responseQueue = []; // clear queue to prevent overlap
-
+  // Safe send audio response function
+  const safeSendAudioResponse = async (text, lang = 'en') => {
     try {
-      await checkForEmergency(transcript);
-
-      // Translate caller to English for AI
-      const englishText = await translateText(transcript, 'en', conversationState.language || 'auto');
-
-      // Detect caller role
-      if (!conversationState.callerRole) {
-        conversationState.callerRole = detectCallerRole(englishText);
-        console.log(`[System]: Identified role as '${conversationState.callerRole}'`);
-      }
-
-      // Call backend AI
-      const aiResponse = await generateAIResponse(englishText);
-
-      if (aiResponse?.response_text) {
-        const targetLang = conversationState.language || 'en';
-        const localizedReply = targetLang !== 'en'
-          ? await translateText(aiResponse.response_text, targetLang, 'en')
-          : aiResponse.response_text;
-
-        // Send AI response via TTS
-        await enqueueTTS(localizedReply, targetLang);
-
-        // Save transcripts
-        await saveTranscriptToMongo(callSid, transcript, 'user');
-        await saveTranscriptToMongo(callSid, localizedReply, 'ai');
-      }
-
-      // Update conversation state
-      if (aiResponse) {
-        conversationState.chatHistory = aiResponse.updated_history || conversationState.chatHistory;
-        conversationState.conversation_stage = aiResponse.stage || conversationState.conversation_stage;
-        console.log(`[CONVERSATION] Intent: ${aiResponse.intent}, Stage: ${aiResponse.stage}`);
-
-        if (aiResponse.stage === 'end_of_call') {
-          console.log('[AI] End of call reached. Hanging up.');
-          await CallLog.findOneAndUpdate(
-            { callSid },
-            {
-              status: 'completed',
-              endTime: new Date(),
-              conversationHistory: conversationState.chatHistory
-            }
-          );
-          ws.send(JSON.stringify({ action: 'hangup' }));
-          setTimeout(() => ws.close(), 5000);
-        }
-      }
-
-    } catch (err) {
-      console.error('Error processing response:', err);
-      await enqueueTTS("Sorry, I'm having a little trouble right now.", conversationState.language || 'en');
-    } finally {
-      conversationState.isProcessingResponse = false;
+      await sendAudioResponse(text, lang);
+    } catch (error) {
+      console.error('Error in safeSendAudioResponse:', error);
     }
-  };
-
-  // Backend AI call
-  const generateAIResponse = async (englishText) => {
-    try {
-      const body = {
-        caller_role: conversationState.callerRole,
-        new_message: englishText,
-        history: conversationState.chatHistory,
-        conversation_stage: conversationState.conversation_stage
-      };
-      const res = await axios.post('http://localhost:5001/generate', body);
-      return res.data;
-    } catch (err) {
-      console.error('[API ERROR]', err.response?.data || err.message);
-      throw err;
-    }
-  };
-
-  // Queue TTS messages safely
-  const enqueueTTS = async (text, lang = 'en') => {
-    if (!text) return;
-    await sendAudioResponse(text, lang);
   };
 
   // Send audio to Twilio
   const sendAudioResponse = async (text, lang = 'en') => {
     if (!text || !conversationState.streamSid) return;
     try {
-      let voiceLang = lang === 'hi' ? 'hi-IN' : lang; // map Hindi
+      let voiceLang = lang === 'hi' ? 'hi-IN' : lang;
       const audio = await textToSpeech(text, voiceLang);
       if (audio) {
         ws.send(JSON.stringify({
@@ -274,58 +180,316 @@ const handleWebSocketConnection = (ws, req) => {
     }
   };
 
+  // Queue TTS messages safely
+  const enqueueTTS = async (text, lang = 'en') => {
+    if (!text) return;
+    await sendAudioResponse(text, lang);
+  };
+
+  // Initial greeting
+  const sendInitialGreeting = async () => {
+    if (conversationState.hasGreeted) return;
+    conversationState.hasGreeted = true;
+
+    const userName = await getUserName();
+    const greeting = `Hi! This is ${userName}'s AI assistant. How can I help you today?`;
+    await enqueueTTS(greeting, 'en');
+  };
+
+  // Emergency detection
+  const checkForEmergency = async (transcript) => {
+    const lowered = transcript.toLowerCase();
+    const emergencyKeywords = ["urgent", "emergency", "asap", "help", "911", "accident", "danger"];
+    
+    const isEmergency = emergencyKeywords.some(keyword => lowered.includes(keyword));
+    
+    if (isEmergency) {
+      console.log("🚨 EMERGENCY DETECTED in transcript:", transcript);
+      
+      if (!conversationState.user) {
+        console.error("❌ Cannot send emergency alert: No user data available");
+        return;
+      }
+      
+      try {
+        const userSettings = await UserSettings.findOne({ 
+          userId: conversationState.user._id 
+        });
+        
+        console.log('🔍 Emergency check - User ID:', conversationState.user._id);
+        console.log('🔍 UserSettings found:', userSettings ? 'Yes' : 'No');
+        console.log('🔍 FCM Token available:', userSettings?.fcmToken ? 'Yes' : 'No');
+        
+        if (userSettings?.fcmToken) {
+          console.log('📱 Sending emergency notification to FCM token:', userSettings.fcmToken);
+          
+          const notificationData = {
+            title: "🚨 URGENT CALL ALERT",
+            body: `Emergency detected in call from ${conversationState.callLog.callerNumber}: "${transcript}"`,
+            priority: "high",
+            callSid: conversationState.callSid,
+            callerNumber: conversationState.callLog.callerNumber,
+            timestamp: new Date().toISOString()
+          };
+          
+          const notificationResult = await sendEmergencyAlert(
+            userSettings.fcmToken, 
+            notificationData
+          );
+          
+          console.log("✅ Emergency notification sent successfully:", notificationResult);
+          await safeSendAudioResponse("I understand this is an emergency. I have immediately notified the person and help is on the way.");
+          
+        } else {
+          console.warn("⚠️ No FCM token found for user. Cannot send push notification.");
+          await safeSendAudioResponse("I understand this is an emergency. Let me try to reach them immediately.");
+        }
+      } catch (err) {
+        console.error("❌ FAILED to send emergency alert:", err);
+        await safeSendAudioResponse("I understand this is urgent. I'm here to help you.");
+      }
+    }
+  };
+
+  // Handle transcripts
+  const onTranscript = async (transcript) => {
+    console.log(`[Caller Said]: ${transcript}`);
+    if (conversationState.isProcessingResponse) return;
+
+    conversationState.responseQueue.push(transcript);
+    await processResponseQueue();
+  };
+
+  // Detect caller role
+  const detectCallerRole = (transcript) => {
+    const text = transcript.toLowerCase();
+    if (text.includes('delivery') || text.includes('package') || text.includes('courier')) return 'delivery';
+    if (text.includes('mom') || text.includes('dad') || text.includes('family') || text.includes('brother') || text.includes('sister')) return 'family';
+    return 'unknown';
+  };
+
+  // Generate AI response
+  const generateAIResponse = async (transcript) => {
+    try {
+      const requestBody = {
+        caller_role: conversationState.callerRole,
+        new_message: transcript,
+        history: conversationState.chatHistory,
+        conversation_stage: conversationState.conversation_stage
+      };
+      const response = await axios.post('http://localhost:5001/generate', requestBody);
+      return response.data;
+    } catch (error) {
+      console.error('[API ERROR] Backend request failed:', error.response?.data || error.message);
+      throw error;
+    }
+  };
+
+  // Process response queue
+  const processResponseQueue = async () => {
+    if (conversationState.isProcessingResponse || conversationState.responseQueue.length === 0) return;
+    conversationState.isProcessingResponse = true;
+
+    const transcript = conversationState.responseQueue.shift();
+    conversationState.responseQueue = [];
+
+    try {
+      // 1️⃣ Emergency Detection
+      await checkForEmergency(transcript);
+
+      // 2️⃣ Detect caller role if not set
+      if (!conversationState.callerRole) {
+        conversationState.callerRole = detectCallerRole(transcript);
+        console.log(`[System]: Identified role as '${conversationState.callerRole}'`);
+      }
+
+      // 3️⃣ Generate AI response
+      const aiResponse = await generateAIResponse(transcript);
+
+      if (aiResponse) {
+        // 4️⃣ Send AI audio response
+        if (aiResponse.response_text) {
+          await safeSendAudioResponse(aiResponse.response_text);
+        }
+
+        // 5️⃣ Update conversation state
+        conversationState.chatHistory = aiResponse.updated_history || conversationState.chatHistory;
+        conversationState.conversation_stage = aiResponse.stage || conversationState.conversation_stage;
+
+        console.log(`[CONVERSATION] Intent: ${aiResponse.intent}, Stage: ${aiResponse.stage}`);
+
+        // 6️⃣ Save transcripts to MongoDB
+        if (conversationState.callSid) {
+          await saveTranscriptToMongo(conversationState.callSid, transcript, 'user');
+          if (aiResponse.response_text) {
+            await saveTranscriptToMongo(conversationState.callSid, aiResponse.response_text, 'ai');
+          }
+        } else {
+          console.error('❌ Cannot save transcript: callSid not available in conversation state');
+        }
+
+        // 7️⃣ Hang up logic if end_of_call
+        if (aiResponse.stage === 'end_of_call') {
+          console.log('[AI] Stage reached: end_of_call → Hanging up call.');
+
+          if (conversationState.callSid) {
+            await CallLog.findOneAndUpdate(
+              { callSid: conversationState.callSid },
+              {
+                status: 'completed',
+                endTime: new Date(),
+                conversationHistory: conversationState.chatHistory
+              }
+            );
+          }
+
+          ws.send(JSON.stringify({ action: 'hangup' }));
+          setTimeout(() => ws.close(), 5000);
+        }
+      }
+
+    } catch (error) {
+      console.error('Error processing response:', error);
+      await safeSendAudioResponse("Sorry, I'm having a little trouble right now. Could you repeat that?");
+    } finally {
+      setTimeout(() => { conversationState.isProcessingResponse = false; }, 500);
+    }
+  };
+
   // WebSocket event handlers
-  ws.on('message', (message) => {
+  ws.on('message', async (message) => {
     const msg = JSON.parse(message);
+    
     switch (msg.event) {
       case 'connected':
         console.log('Twilio media stream connected');
         break;
       case 'start':
+        console.log('📞 Twilio start message received:', {
+          streamSid: msg.start.streamSid,
+          callSid: msg.start.callSid
+        });
+        
         conversationState.streamSid = msg.start.streamSid;
         conversationState.sttService = new SttService();
         conversationState.sttService.on('speech_transcribed', onTranscript);
+        
+        if (msg.start.callSid) {
+          const initialized = await initializeCallData(msg.start.callSid);
+          if (!initialized) {
+            console.error('❌ Failed to initialize call data');
+          }
+        } else {
+          console.error('❌ No callSid in Twilio start message');
+        }
+        
         setTimeout(sendInitialGreeting, 1000);
         break;
       case 'media':
-        conversationState.sttService?.sendAudio(msg.media.payload);
+        if (conversationState.sttService) {
+          conversationState.sttService.sendAudio(msg.media.payload);
+        }
         break;
       case 'stop':
+        console.log('📞 Twilio stop message received');
         cleanup();
         break;
     }
   });
 
-  ws.on('close', cleanup);
-  ws.on('error', (err) => {
-    console.error('WebSocket error:', err);
-    cleanup();
-  });
-
-  function cleanup() {
-    conversationState.sttService?.close();
+  const cleanup = () => {
+    if (conversationState.sttService) conversationState.sttService.close();
     conversationState.sttService = null;
     conversationState.responseQueue = [];
     conversationState.isProcessingResponse = false;
-  }
+    conversationState.callSid = null;
+    conversationState.user = null;
+    conversationState.callLog = null;
+  };
+
+  ws.on('close', cleanup);
+  ws.on('error', (err) => { 
+    console.error('WebSocket error:', err); 
+    cleanup(); 
+  });
 };
 
+// Status route to update call duration
+const registerStatusRoute = (app) => {
+  app.post('/api/twilio/status', async (req, res) => {
+    try {
+      const { CallSid, CallDuration, CallStatus } = req.body;
+      console.log('📞 Call status update:', { CallSid, CallDuration, CallStatus });
+      
+      const updateData = { 
+        duration: CallDuration,
+        status: CallStatus || 'completed'
+      };
+      
+      if (CallStatus === 'completed' || CallStatus === 'no-answer' || CallStatus === 'busy') {
+        updateData.endTime = new Date();
+      }
 
+      const updatedCallLog = await CallLog.findOneAndUpdate(
+        { callSid: CallSid },
+        updateData,
+        { new: true }
+      );
 
+      if (updatedCallLog) {
+        console.log(`✅ Call status updated for ${CallSid}:`, updateData);
+      } else {
+        console.warn(`❌ No CallLog found for callSid: ${CallSid}`);
+      }
+
+      res.sendStatus(200);
+    } catch (error) {
+      console.error('Error updating call status:', error);
+      res.sendStatus(500);
+    }
+  });
+};
+
+// Handle sending manual notifications (if needed)
 const handleSendNotification = async (req, res) => {
   try {
-    const { user_phone, title, message, type } = req.body;
-    // Your logic to send a push notification...
-    const result = await sendPushNotification({
-      title,
+    const { userId, message, priority = 'normal' } = req.body;
+
+    if (!userId || !message) {
+      return res.status(400).json({ error: 'userId and message are required' });
+    }
+
+    // Find user settings for FCM token
+    const userSettings = await UserSettings.findOne({ userId });
+    
+    if (!userSettings?.fcmToken) {
+      return res.status(404).json({ error: 'No FCM token found for user' });
+    }
+
+    const notificationData = {
+      title: "Message from AI Assistant",
       body: message,
-      data: { type, approval_token: extractTokenFromMessage(message) }
+      priority: priority,
+      timestamp: new Date().toISOString()
+    };
+
+    const result = await sendEmergencyAlert(userSettings.fcmToken, notificationData);
+    
+    res.status(200).json({ 
+      success: true, 
+      message: 'Notification sent successfully',
+      result 
     });
-    res.json({ success: result });
+
   } catch (error) {
     console.error('Error sending notification:', error);
-    res.status(500).json({ success: false, error: 'Failed to send notification' });
+    res.status(500).json({ error: 'Failed to send notification' });
   }
 };
 
-module.exports = { handleIncomingCall, handleWebSocketConnection, handleSendNotification };
+module.exports = { 
+  handleIncomingCall, 
+  handleWebSocketConnection, 
+  registerStatusRoute,
+  handleSendNotification
+};
