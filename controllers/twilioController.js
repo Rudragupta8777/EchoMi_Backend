@@ -6,7 +6,7 @@ const { textToSpeech } = require('../services/ttsService');
 const User = require('../models/User');
 const CallLog = require('../models/CallLog');
 const UserSettings = require('../models/UserSettings');
-const { sendEmergencyAlert } = require('../services/fcmService');
+const { sendEmergencyAlert, sendSmsFetchRequest } = require('../services/fcmService');
 const url = require('url');
 const { translateText } = require('../services/translationService');
 
@@ -47,7 +47,38 @@ const saveTranscriptToMongo = async (callSid, newMessage, role) => {
     }
 };
 
+// Add this function to handle SMS fetching when call starts
+// Replace the existing triggerSmsFetchForCall function with this enhanced version
+const triggerSmsFetchForCall = async (userId, callSid, storageType = 'regular') => {
+    try {
+        console.log(`📱 Triggering SMS fetch for call ${callSid}, user ${userId}, type: ${storageType}`);
+        
+        // Get user's FCM token
+        const userSettings = await UserSettings.findOne({ userId });
+        if (!userSettings?.fcmToken) {
+            console.error('❌ No FCM token found for user:', userId);
+            return false;
+        }
+
+        // Ensure all values are properly converted to strings
+        await sendSmsFetchRequest(userSettings.fcmToken, {
+            callSid: callSid.toString(),
+            userId: userId.toString(), // Convert ObjectId to string
+            storageType: storageType.toString(),
+            limit: 20 // This will be converted to string in the service
+        });
+
+        console.log(`✅ SMS fetch FCM sent for call ${callSid}`);
+        return true;
+        
+    } catch (error) {
+        console.error('❌ Error triggering SMS fetch:', error);
+        return false;
+    }
+};
+
 // Handle incoming Twilio call
+// Update the handleIncomingCall function to trigger REGULAR SMS fetch
 const handleIncomingCall = async (req, res) => {
   try {
     const twiml = new VoiceResponse();
@@ -69,6 +100,9 @@ const handleIncomingCall = async (req, res) => {
     });
     await callLog.save();
     console.log('CallLog created:', callLog);
+
+    // 🔥 Trigger REGULAR SMS fetch from mobile app
+    triggerSmsFetchForCall(user._id, callSid, 'regular');
 
     // Twilio greeting
     twiml.say(
@@ -196,60 +230,61 @@ const handleWebSocketConnection = (ws, req) => {
     await enqueueTTS(greeting, 'en');
   };
 
-  // Emergency detection
-  const checkForEmergency = async (transcript) => {
+  // Enhanced emergency detection with SMS storage
+const checkForEmergency = async (transcript) => {
     const lowered = transcript.toLowerCase();
-    const emergencyKeywords = ["urgent", "emergency", "asap", "911", "accident", "danger"];
+    const emergencyKeywords = ["urgent", "emergency", "asap", "911", "accident", "danger", "help", "ambulance"];
     
     const isEmergency = emergencyKeywords.some(keyword => lowered.includes(keyword));
     
     if (isEmergency) {
-      console.log("🚨 EMERGENCY DETECTED in transcript:", transcript);
-      
-      if (!conversationState.user) {
-        console.error("❌ Cannot send emergency alert: No user data available");
-        return;
-      }
-      
-      try {
-        const userSettings = await UserSettings.findOne({ 
-          userId: conversationState.user._id 
-        });
+        console.log("🚨 EMERGENCY DETECTED in transcript:", transcript);
         
-        console.log('🔍 Emergency check - User ID:', conversationState.user._id);
-        console.log('🔍 UserSettings found:', userSettings ? 'Yes' : 'No');
-        console.log('🔍 FCM Token available:', userSettings?.fcmToken ? 'Yes' : 'No');
-        
-        if (userSettings?.fcmToken) {
-          console.log('📱 Sending emergency notification to FCM token:', userSettings.fcmToken);
-          
-          const notificationData = {
-            title: "🚨 URGENT CALL ALERT",
-            body: `Emergency detected in call from ${conversationState.callLog.callerNumber}: "${transcript}"`,
-            priority: "high",
-            callSid: conversationState.callSid,
-            callerNumber: conversationState.callLog.callerNumber,
-            timestamp: new Date().toISOString()
-          };
-          
-          const notificationResult = await sendEmergencyAlert(
-            userSettings.fcmToken, 
-            notificationData
-          );
-          
-          console.log("✅ Emergency notification sent successfully:", notificationResult);
-          await safeSendAudioResponse("I understand this is an emergency. I have immediately notified the person and help is on the way.");
-          
-        } else {
-          console.warn("⚠️ No FCM token found for user. Cannot send push notification.");
-          await safeSendAudioResponse("I understand this is an emergency. Let me try to reach them immediately.");
+        if (!conversationState.user) {
+            console.error("❌ Cannot send emergency alert: No user data available");
+            return;
         }
-      } catch (err) {
-        console.error("❌ FAILED to send emergency alert:", err);
-        await safeSendAudioResponse("I understand this is urgent. I'm here to help you.");
-      }
+        
+        try {
+            const userSettings = await UserSettings.findOne({ 
+                userId: conversationState.user._id 
+            });
+            
+            // 🔥 Trigger EMERGENCY SMS fetch (different from regular)
+            if (conversationState.callSid) {
+                await triggerSmsFetchForCall(conversationState.user._id, conversationState.callSid, 'emergency');
+            }
+            
+            if (userSettings?.fcmToken) {
+                console.log('📱 Sending emergency notification to FCM token');
+                
+                const notificationData = {
+                    title: "🚨 URGENT CALL ALERT",
+                    body: `Emergency detected in call from ${conversationState.callLog.callerNumber}: "${transcript}"`,
+                    priority: "high",
+                    callSid: conversationState.callSid,
+                    callerNumber: conversationState.callLog.callerNumber,
+                    timestamp: new Date().toISOString()
+                };
+                
+                const notificationResult = await sendEmergencyAlert(
+                    userSettings.fcmToken, 
+                    notificationData
+                );
+                
+                console.log("✅ Emergency notification sent successfully");
+                await safeSendAudioResponse("I understand this is an emergency. I have immediately notified the person and help is on the way. I'm also checking your recent messages for any important information.");
+                
+            } else {
+                console.warn("⚠️ No FCM token found for user. Cannot send push notification.");
+                await safeSendAudioResponse("I understand this is an emergency. Let me try to reach them immediately and check your messages for important information.");
+            }
+        } catch (err) {
+            console.error("❌ FAILED to send emergency alert:", err);
+            await safeSendAudioResponse("I understand this is urgent. I'm here to help you.");
+        }
     }
-  };
+};
 
   // Handle transcripts
   const onTranscript = async (transcript) => {
@@ -275,14 +310,66 @@ const handleWebSocketConnection = (ws, req) => {
         caller_role: conversationState.callerRole,
         new_message: transcript,
         history: conversationState.chatHistory,
-        conversation_stage: conversationState.conversation_stage
+        conversation_stage: conversationState.conversation_stage,
+        call_sid: conversationState.callSid  // Include call SID for SMS requests
       };
-      const response = await axios.post('https://7cddf8c0f306.ngrok-free.app/generate', requestBody);
+      const response = await axios.post('https://4dc8b2a20e60.ngrok-free.app/generate', requestBody);
+      // Check if AI model is requesting SMS
+      if (response.data.requires_sms === true) {
+          console.log('[SMS] AI model requested SMS data for call:', conversationState.callSid);
+          await handleSmsRequest(response.data);
+      }
+        
       return response.data;
     } catch (error) {
       console.error('[API ERROR] Backend request failed:', error.response?.data || error.message);
       throw error;
     }
+  };
+
+  // Enhanced SMS request handling for AI
+  const handleSmsRequest = async (aiResponse, transcript) => {
+      try {
+          if (!conversationState.callSid) {
+              console.error('❌ No call SID available for SMS fetch');
+              return;
+          }
+
+          // Check if we need to trigger a fresh SMS fetch
+          const hasExistingSms = await SmsService.hasSmsForCall(conversationState.callSid);
+          if (!hasExistingSms) {
+              console.log('🔄 No SMS found for call, triggering fresh fetch');
+              await triggerSmsFetchForCall(conversationState.user._id, conversationState.callSid, 'regular');
+          }
+
+          // Fetch latest SMS messages for this call
+          const smsResponse = await axios.post('https://bb32aa65b2a0.ngrok-free.app/api/sms/call/latest', {
+              callSid: conversationState.callSid,
+              limit: 20
+          });
+
+          if (smsResponse.data.success) {
+              console.log(`[SMS] Fetched ${smsResponse.data.count} messages for AI model`);
+              
+              // Send SMS data back to AI model for processing
+              const smsRequest = {
+                  original_message: transcript,
+                  original_ai_response: aiResponse,
+                  sms_data: smsResponse.data.data,
+                  call_sid: conversationState.callSid,
+                  requires_reprocessing: true
+              };
+
+              const updatedAiResponse = await axios.post('https://bb32aa65b2a0.ngrok-free.app/process-with-sms', smsRequest);
+              
+              // Update the AI response with SMS-enhanced content
+              Object.assign(aiResponse, updatedAiResponse.data);
+          }
+
+      } catch (error) {
+          console.error('[SMS ERROR] Failed to fetch SMS for AI model:', error);
+          // Continue with original AI response if SMS fails
+      }
   };
 
   // Process response queue
