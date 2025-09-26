@@ -150,12 +150,174 @@ class SMSVerificationService {
     }
   }
 
-  async verifyTrackingId(trackingId, company, otp) {
-    const pattern = /^[A-Z0-9]{6,15}$/i;
-    if (pattern.test(trackingId.trim())) {
-      return { verified: true, message: 'Tracking ID verified!' };
-    } else {
-      return { verified: false, message: 'Invalid tracking ID format' };
+  // Extract tracking IDs from SMS messages
+  extractTrackingFromMessages(messages, company) {
+    try {
+      if (!messages || !Array.isArray(messages)) {
+        return { found: false, trackingIds: [] };
+      }
+      
+      const companyLower = company?.toLowerCase() || '';
+      const trackingIds = [];
+      
+      console.log(`[SMS SERVICE] Looking for ${companyLower} tracking IDs in ${messages.length} messages`);
+      
+      for (const message of messages) {
+        const messageText = message.message?.toLowerCase() || '';
+        const sender = message.sender?.toLowerCase() || '';
+        
+        // Check if message is from the relevant company
+        const isRelevantMessage = 
+          messageText.includes(companyLower) || 
+          sender.includes(companyLower) ||
+          (companyLower === 'swiggy' && (messageText.includes('delivery') || messageText.includes('order'))) ||
+          (companyLower === 'amazon' && messageText.includes('delivery')) ||
+          (companyLower === 'zomato' && (messageText.includes('food') || messageText.includes('order'))) ||
+          messageText.includes('tracking') || messageText.includes('order');
+        
+        if (isRelevantMessage) {
+          console.log(`[SMS SERVICE]  Checking for tracking ID in message from ${message.sender}: "${messageText}"`);
+          
+          // Tracking ID patterns for different companies
+          const trackingPatterns = [
+            // Amazon patterns
+            /order[#\s-]*([A-Z0-9]{10,})/i,
+            /tracking[#\s-]*([A-Z0-9]{8,})/i,
+            /reference[#\s-]*([A-Z0-9]{8,})/i,
+            
+            // Swiggy patterns
+            /order[#\s-]*(\d{8,})/i,
+            /delivery[#\s-]*(\d{8,})/i,
+            /transaction[#\s\-:]*(\d{8,})/i,  // Added for Swiggy transaction IDs
+            
+            // Zomato patterns
+            /order[#\s-]*([A-Z0-9]{6,})/i,
+            
+            // Generic patterns
+            /\b([A-Z]{2}\d{8,})\b/g,  // Like AB12345678
+            /\b(\d{10,})\b/g,         // Long numbers
+            /\b([A-Z0-9]{8,})\b/g     // Alphanumeric codes
+          ];
+          
+          for (const pattern of trackingPatterns) {
+            const matches = messageText.match(pattern);
+            if (matches) {
+              console.log(`[SMS SERVICE]    Pattern matched: ${pattern} → ${matches[1]}`);
+              if (pattern.global) {
+                // For global patterns, get all matches
+                const allMatches = [...messageText.matchAll(pattern)];
+                for (const match of allMatches) {
+                  if (match[1] && match[1].length >= 6) {
+                    trackingIds.push(match[1].toUpperCase());
+                    console.log(`[SMS SERVICE]    Added tracking ID: ${match[1].toUpperCase()}`);
+                  }
+                }
+              } else {
+                // For non-global patterns, get first match
+                if (matches[1] && matches[1].length >= 6) {
+                  trackingIds.push(matches[1].toUpperCase());
+                  console.log(`[SMS SERVICE]    Added tracking ID: ${matches[1].toUpperCase()}`);
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      // Remove duplicates and filter valid tracking IDs
+      const uniqueTrackingIds = [...new Set(trackingIds)].filter(id => 
+        id.length >= 6 && id.length <= 20 && !/^\d{4}$|^\d{6}$/.test(id) // Exclude OTPs
+      );
+      
+      console.log(`[SMS SERVICE]  Found tracking IDs: ${uniqueTrackingIds.join(', ')}`);
+      
+      return {
+        found: uniqueTrackingIds.length > 0,
+        trackingIds: uniqueTrackingIds
+      };
+      
+    } catch (error) {
+      console.error('[SMS SERVICE] Error extracting tracking IDs:', error);
+      return { found: false, trackingIds: [] };
+    }
+  }
+
+  // Verify if provided tracking ID matches any in SMS
+  async verifyTrackingId(providedTrackingId, company, callSid) {
+    try {
+      console.log(`[TRACKING VERIFICATION] Verifying tracking ID: "${providedTrackingId}" for ${company}`);
+      
+      if (!callSid) {
+        console.error('[TRACKING VERIFICATION] ❌ No callSid provided for verification');
+        return {
+          verified: false,
+          message: "I don't have the delivery information. Let me send a notification for approval."
+        };
+      }
+      
+      // Fetch SMS messages for this call
+      const smsEndpoint = `${process.env.SMS_ENDPOINT_URL || 'http://localhost:3000'}/api/sms/call/latest`;
+      const smsResponse = await axios.post(smsEndpoint, {
+        callSid: callSid,
+        limit: 20
+      });
+
+      if (smsResponse.data.success && smsResponse.data.data && smsResponse.data.data.length > 0) {
+        const trackingResult = this.extractTrackingFromMessages(smsResponse.data.data, company);
+        
+        if (trackingResult.found) {
+          console.log(`[TRACKING VERIFICATION] Found tracking IDs in SMS: ${trackingResult.trackingIds.join(', ')}`);
+          
+          // Check if provided tracking ID matches any extracted tracking ID
+          // Normalize provided tracking ID - remove all non-alphanumeric characters
+          const providedNormalized = providedTrackingId.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+          console.log(`[TRACKING VERIFICATION] Normalized provided ID: "${providedNormalized}"`);
+          console.log(`[TRACKING VERIFICATION] Comparing provided: "${providedTrackingId}" (normalized: "${providedNormalized}") with extracted: [${trackingResult.trackingIds.join(', ')}]`);
+          
+          const isMatch = trackingResult.trackingIds.some(id => {
+            const extractedNormalized = id.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+            console.log(`[TRACKING VERIFICATION] Comparing "${providedNormalized}" with "${extractedNormalized}"`);
+            return extractedNormalized === providedNormalized || 
+                   extractedNormalized.includes(providedNormalized) || 
+                   providedNormalized.includes(extractedNormalized);
+          });
+          
+          console.log(`[TRACKING VERIFICATION] Match result: ${isMatch}`);
+          
+          if (isMatch) {
+            console.log(`[TRACKING VERIFICATION] ✅ Tracking ID verified successfully`);
+            return {
+              verified: true,
+              message: "Tracking ID verified successfully!"
+            };
+          } else {
+            console.log(`[TRACKING VERIFICATION] ❌ Tracking ID does not match. Expected: ${trackingResult.trackingIds.join(' or ')}`);
+            return {
+              verified: false,
+              message: "The tracking ID you provided doesn't match our records. Please check and try again."
+            };
+          }
+        } else {
+          console.log(`[TRACKING VERIFICATION] ❌ No tracking IDs found in SMS messages`);
+          return {
+            verified: false,
+            message: "I couldn't find any tracking information in the messages. Let me send a notification for manual approval."
+          };
+        }
+      } else {
+        console.log(`[TRACKING VERIFICATION] ❌ No SMS messages found for verification`);
+        return {
+          verified: false,
+          message: "I don't have the delivery information. Let me send a notification for approval."
+        };
+      }
+      
+    } catch (error) {
+      console.error('[TRACKING VERIFICATION] Error verifying tracking ID:', error);
+      return {
+        verified: false,
+        message: "I'm having trouble verifying the tracking ID. Let me send a notification for manual approval."
+      };
     }
   }
 

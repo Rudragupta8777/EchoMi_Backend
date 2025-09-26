@@ -195,7 +195,9 @@ const handleWebSocketConnection = (ws, req) => {
   // Safe send audio response function
   const safeSendAudioResponse = async (text, lang = 'en') => {
     try {
-      await sendAudioResponse(text, lang);
+      // Format OTP for proper pronunciation before sending to TTS
+      const formattedText = formatOtpForSpeech(text);
+      await sendAudioResponse(formattedText, lang);
     } catch (error) {
       console.error('Error in safeSendAudioResponse:', error);
     }
@@ -233,6 +235,22 @@ const handleWebSocketConnection = (ws, req) => {
     const userName = await getUserName();
     const greeting = `Hi! This is ${userName}'s AI assistant. How can I help you today?`;
     await enqueueTTS(greeting, 'en');
+  };
+
+  // Helper function to format OTP for proper pronunciation
+  const formatOtpForSpeech = (text) => {
+    return text.replace(/\bOTP\b/g, 'O T P');
+  };
+
+  // Helper function to format OTP digits for clear pronunciation
+  const formatOtpDigits = (otp) => {
+    // Convert each digit to its word form for clearer pronunciation
+    const digitWords = {
+      '0': 'zero', '1': 'one', '2': 'two', '3': 'three', '4': 'four',
+      '5': 'five', '6': 'six', '7': 'seven', '8': 'eight', '9': 'nine'
+    };
+    
+    return otp.split('').map(digit => digitWords[digit] || digit).join(', ');
   };
 
   // Enhanced emergency detection with SMS storage
@@ -414,6 +432,12 @@ const checkForEmergency = async (transcript) => {
       console.log(`[AI REQUEST] Sending to AI model - Stage: ${conversationState.conversation_stage}, Collected Info:`, JSON.stringify(conversationState.collected_info, null, 2));
       
       const response = await axios.post(process.env.AI_ENDPOINT_URL || 'http://localhost:5000/generate', requestBody);
+      
+      // Post-process AI response to fix OTP pronunciation
+      if (response.data.response_text) {
+        response.data.response_text = formatOtpForSpeech(response.data.response_text);
+      }
+      
       // Check if AI model is requesting SMS
       if (response.data.requires_sms === true) {
           console.log('[SMS] AI model requested SMS data for call:', conversationState.callSid);
@@ -438,42 +462,62 @@ const checkForEmergency = async (transcript) => {
           // Check if we need to trigger a fresh SMS fetch
           const company = conversationState.collected_info?.company || aiResponse.company_requested || 'unknown';
           console.log(`[SMS REQUEST] Looking for ${company} OTP for user ${conversationState.user._id}`);
-          const hasExistingSms = await smsVerificationService.checkForOTP(conversationState.user._id, company, conversationState.callSid);
-          if (!hasExistingSms.found) {
+          
+          // Use our SMS verification service which includes simulation fallback
+          const smsResult = await smsVerificationService.checkForOTP(conversationState.user._id, company, conversationState.callSid);
+          
+          if (!smsResult.found) {
               console.log('🔄 No SMS found for call, triggering fresh fetch');
               await triggerSmsFetchForCall(conversationState.user._id, conversationState.callSid, 'regular');
-          }
-
-          // Fetch latest SMS messages for this call
-          const smsResponse = await axios.post('https://a4825753e30d.ngrok-free.app/api/sms/call/latest', {
-              callSid: conversationState.callSid,
-              limit: 20
-          });
-
-          if (smsResponse.data.success && smsResponse.data.data) {
-              console.log(`[SMS] Fetched ${smsResponse.data.count} messages for AI model`);
               
-              // Process SMS data locally to find OTP
-              const company = conversationState.collected_info?.company || aiResponse.company_requested;
-              const otpResult = extractOTPFromMessages(smsResponse.data.data, company);
-              
-              if (otpResult.found) {
-                  console.log(`[OTP EXTRACTED] Found ${company} OTP: ${otpResult.otp}`);
+              // Try again after triggering fetch
+              const retryResult = await smsVerificationService.checkForOTP(conversationState.user._id, company, conversationState.callSid);
+              if (retryResult.found) {
+                  console.log(`[OTP FOUND ON RETRY] Found ${company} OTP: ${retryResult.otp}`);
+                  // Store the found OTP in conversation state
+                  conversationState.found_otp = retryResult.otp;
                   
-                  // Update the AI response to indicate OTP was found
+                  // Update the AI response to show we need tracking verification
                   aiResponse.otp_found = true;
-                  aiResponse.otp_value = otpResult.otp;
-                  aiResponse.response_text = `Great! I found your ${company} OTP: ${otpResult.otp.split('').join(' ')}`;
-                  aiResponse.conversation_stage = 'otp_provided';
-                  aiResponse.intent = 'otp_shared';
+                  aiResponse.otp_value = retryResult.otp;
+                  aiResponse.response_text = `Great! I found your ${company} O T P. For security, please provide your tracking ID or order ID to verify this delivery.`;
+                  aiResponse.conversation_stage = 'asking_tracking_id';
+                  aiResponse.intent = 'verify_tracking';
               } else {
                   console.log(`[OTP NOT FOUND] No ${company} OTP found in SMS messages`);
-                  aiResponse.response_text = `I checked your recent messages but couldn't find a ${company} OTP. Would you like me to ask for approval to share any available OTP?`;
+                  aiResponse.response_text = `I checked your recent messages but couldn't find a ${company} O T P. Would you like me to ask for approval to share any available O T P?`;
+                  aiResponse.conversation_stage = 'checking_sms';
+                  aiResponse.intent = 'request_approval';
               }
+          } else {
+              console.log(`[OTP FOUND] Found ${company} OTP: ${smsResult.otp}`);
+              // Store the found OTP in conversation state
+              conversationState.found_otp = smsResult.otp;
+              
+              // Update the AI response to show we need tracking verification
+              aiResponse.otp_found = true;
+              aiResponse.otp_value = smsResult.otp;
+              aiResponse.response_text = `Great! I found your ${company} O T P. For security, please provide your tracking ID or order ID to verify this delivery.`;
+              aiResponse.conversation_stage = 'asking_tracking_id';
+              aiResponse.intent = 'verify_tracking';
+          }
+
+          // Try to fetch actual SMS messages for additional context (but don't depend on it)
+          try {
+              const smsResponse = await axios.post('https://6706aab6dac3.ngrok-free.app/api/sms/call/latest', {
+                  callSid: conversationState.callSid,
+                  limit: 20
+              });
+
+              if (smsResponse.data.success && smsResponse.data.data) {
+                  console.log(`[SMS] Fetched ${smsResponse.data.count} messages for AI model`);
+              }
+          } catch (httpError) {
+              console.log('[SMS HTTP] Could not fetch via HTTP, using service result');
           }
 
       } catch (error) {
-          console.error('[SMS ERROR] Failed to fetch SMS for AI model:', error);
+          console.error('[SMS ERROR] Failed to process SMS request:', error);
           // Continue with original AI response if SMS fails
       }
   };
@@ -540,7 +584,7 @@ const checkForEmergency = async (transcript) => {
       
       if (!company) {
         console.error('[OTP VERIFICATION] No company specified for OTP verification');
-        await safeSendAudioResponse('Sorry, I need to know which company this OTP is for.');
+        await safeSendAudioResponse('Sorry, I need to know which company this O T P is for.');
         return;
       }
       
@@ -550,7 +594,7 @@ const checkForEmergency = async (transcript) => {
       if (aiResponse.otp_found && aiResponse.otp_value) {
         console.log(`[OTP DIRECT] Using OTP found in SMS: ${aiResponse.otp_value}`);
         
-        const otpMessage = `Great! I found your ${company} OTP: ${aiResponse.otp_value.split('').join(' ')}`;
+        const otpMessage = `Great! I found your ${company} O T P: ${formatOtpDigits(aiResponse.otp_value)}`;
         await safeSendAudioResponse(otpMessage);
         
         // Update conversation state
@@ -567,66 +611,124 @@ const checkForEmergency = async (transcript) => {
       }
       
       // Fall back to our SMS verification service
-      const smsResult = await smsVerificationService.checkForOTP(userId, company, callSid);
+      const smsResult = await smsVerificationService.checkForOTP(userId, company, conversationState.callSid);
       
       if (smsResult.found) {
         console.log(`[OTP FOUND] OTP found for ${company}: ${smsResult.otp}`);
         
-        // Ask for tracking ID verification
-        const trackingPrompt = `Great! I found your ${company} OTP. For security, please provide your tracking ID to verify this delivery.`;
+        // Check if we already have tracking/order information from AI
+        const hasTrackingInfo = conversationState.collected_info?.order_id || 
+                               conversationState.collected_info?.tracking_id ||
+                               conversationState.collected_info?.tracking_number;
         
-        // Update conversation stage to ask for tracking
-        conversationState.conversation_stage = 'asking_tracking_id';
-        conversationState.current_intent = 'verify_tracking';
-        conversationState.found_otp = smsResult.otp; // Store the found OTP
-        
-        await safeSendAudioResponse(trackingPrompt);
-        
-        // Update chat history with the new message
-        conversationState.chatHistory.push({
-          role: "assistant", 
-          content: trackingPrompt
-        });
+        if (hasTrackingInfo) {
+          console.log(`[TRACKING FOUND] AI already collected tracking info:`, hasTrackingInfo);
+          // Verify the existing tracking info
+          const trackingToVerify = hasTrackingInfo;
+          const verificationResult = await smsVerificationService.verifyTrackingId(
+            trackingToVerify,
+            company,
+            conversationState.callSid
+          );
+          
+          if (verificationResult.verified) {
+            // Success! Share the OTP immediately
+            const otpMessage = `Perfect! I verified your tracking ID and found your ${company} O T P: ${formatOtpDigits(smsResult.otp)}`;
+            await safeSendAudioResponse(otpMessage);
+            
+            // Update conversation state
+            conversationState.conversation_stage = 'otp_provided';
+            conversationState.current_intent = 'otp_shared';
+            
+            // Update chat history
+            conversationState.chatHistory.push({
+              role: "assistant", 
+              content: otpMessage
+            });
+            
+            return;
+          } else {
+            // Invalid tracking ID - ask for correct one
+            const invalidMessage = `I have your ${company} OTP, but the tracking ID doesn't match. Please provide the correct tracking ID or order ID.`;
+            await safeSendAudioResponse(invalidMessage);
+            
+            conversationState.conversation_stage = 'asking_tracking_id';
+            conversationState.current_intent = 'verify_tracking';
+            conversationState.found_otp = smsResult.otp;
+            
+            conversationState.chatHistory.push({
+              role: "assistant", 
+              content: invalidMessage
+            });
+            
+            return;
+          }
+        } else {
+          // Ask for tracking ID verification
+          const trackingPrompt = `Great! I found your ${company} OTP. For security, please provide your tracking ID or order ID to verify this delivery.`;
+          
+          // Update conversation stage to ask for tracking
+          conversationState.conversation_stage = 'asking_tracking_id';
+          conversationState.current_intent = 'verify_tracking';
+          conversationState.found_otp = smsResult.otp; // Store the found OTP
+          
+          await safeSendAudioResponse(trackingPrompt);
+          
+          // Update chat history with the new message
+          conversationState.chatHistory.push({
+            role: "assistant", 
+            content: trackingPrompt
+          });
+        }
         
       } else {
         console.log(`[OTP NOT FOUND] No OTP found for ${company}`);
         
-        // No OTP found - ask user for approval
-        if (conversationState.user?.fcmToken) {
-          console.log(`[APPROVAL REQUEST] Requesting user approval for ${company} OTP`);
+        // No OTP found - ask user for approval - get FCM token from UserSettings
+        try {
+          const userSettings = await UserSettings.findOne({ 
+            userId: conversationState.user._id 
+          });
           
-          const approvalResult = await smsVerificationService.requestUserApproval(
-            userId,
-            conversationState.user.fcmToken,
-            company,
-            conversationState.callLog?.callerNumber,
-            conversationState.callSid
-          );
-          
-          if (approvalResult.sent) {
-            const approvalPrompt = `I couldn't find a recent ${company} OTP in your messages. I've sent a notification to approve sharing any available OTP. Please check your phone and approve if you want to share the OTP.`;
+          if (userSettings?.fcmToken) {
+            console.log(`[APPROVAL REQUEST] Requesting user approval for ${company} OTP`);
             
-            conversationState.conversation_stage = 'waiting_approval';
-            conversationState.current_intent = 'awaiting_user_approval';
-            conversationState.approval_id = approvalResult.approvalId;
+            const approvalResult = await smsVerificationService.requestUserApproval(
+              userId,
+              userSettings.fcmToken,
+              company,
+              conversationState.callLog?.callerNumber,
+              conversationState.callSid
+            );
             
-            await safeSendAudioResponse(approvalPrompt);
-            
-            conversationState.chatHistory.push({
-              role: "assistant",
-              content: approvalPrompt
-            });
+            if (approvalResult.sent) {
+              const approvalPrompt = `I couldn't find a recent ${company} O T P in your messages. I've sent a notification to approve sharing any available O T P. Please check your phone and approve if you want to share the O T P.`;
+              
+              conversationState.conversation_stage = 'waiting_approval';
+              conversationState.current_intent = 'awaiting_user_approval';
+              conversationState.approval_id = approvalResult.approvalId;
+              
+              await safeSendAudioResponse(approvalPrompt);
+              
+              conversationState.chatHistory.push({
+                role: "assistant",
+                content: approvalPrompt
+              });
+            } else {
+              await safeSendAudioResponse(`Sorry, I couldn't find a recent ${company} O T P and couldn't send an approval request. Please try again later.`);
+            }
           } else {
-            await safeSendAudioResponse(`Sorry, I couldn't find a recent ${company} OTP and couldn't send an approval request. Please try again later.`);
+            await safeSendAudioResponse(`Sorry, I couldn't find a recent ${company} O T P and no notification service is available.`);
           }
-        } else {
-          await safeSendAudioResponse(`Sorry, I couldn't find a recent ${company} OTP in your messages.`);
+        } catch (fcmError) {
+          console.error('[FCM ERROR in OTP flow]:', fcmError);
+          await safeSendAudioResponse(`Sorry, I couldn't find a recent ${company} O T P and there was an error with the notification service.`);
         }
       }
       
     } catch (error) {
       console.error('[OTP VERIFICATION ERROR]', error);
-      await safeSendAudioResponse('Sorry, there was an error checking for your OTP. Please try again.');
+      await safeSendAudioResponse('Sorry, there was an error checking for your O T P. Please try again.');
     }
   };
 
@@ -670,38 +772,141 @@ const checkForEmergency = async (transcript) => {
       if (conversationState.conversation_stage === 'asking_tracking_id' && conversationState.found_otp) {
         console.log(`[TRACKING VERIFICATION] Processing tracking ID: "${transcript}"`);
         
-        const verificationResult = await smsVerificationService.verifyTrackingId(
-          transcript,
-          conversationState.collected_info.company,
-          conversationState.found_otp
-        );
+        const lowerTranscript = transcript.toLowerCase();
         
-        if (verificationResult.verified) {
-          // Success! Share the OTP
-          const otpMessage = `Tracking ID verified! Your ${conversationState.collected_info.company} OTP is: ${conversationState.found_otp.split('').join(' ')}`;
-          await safeSendAudioResponse(otpMessage);
+        // Check if delivery person says they don't have tracking ID
+        if (lowerTranscript.includes('no tracking') || 
+            lowerTranscript.includes("don't have") || 
+            lowerTranscript.includes("i don't know") ||
+            lowerTranscript.includes('not available') ||
+            lowerTranscript.includes('no order id') ||
+            lowerTranscript.includes('not given')) {
           
-          // Update conversation state
-          conversationState.conversation_stage = 'otp_provided';
-          conversationState.current_intent = 'otp_shared';
+          console.log(`[TRACKING VERIFICATION] Delivery person doesn't have tracking ID, requesting approval`);
           
-          // Add to chat history
-          conversationState.chatHistory.push({role: "user", content: transcript});
-          conversationState.chatHistory.push({role: "assistant", content: otpMessage});
+          // Send push notification for manual approval - get FCM token from UserSettings
+          try {
+            const userSettings = await UserSettings.findOne({ 
+              userId: conversationState.user._id 
+            });
+            
+            if (userSettings?.fcmToken) {
+              const approvalResult = await smsVerificationService.requestUserApproval(
+                conversationState.user._id,
+                userSettings.fcmToken,
+                conversationState.collected_info.company,
+                conversationState.callLog?.callerNumber,
+                conversationState.callSid
+              );
+              
+              if (approvalResult.sent) {
+                const approvalPrompt = `I understand you don't have the tracking ID. I've sent a notification for manual approval. Please wait while the recipient approves sharing the O T P.`;
+                
+                conversationState.conversation_stage = 'waiting_approval';
+                conversationState.current_intent = 'awaiting_user_approval';
+                conversationState.approval_id = approvalResult.approvalId;
+                
+                await safeSendAudioResponse(approvalPrompt);
+                
+                conversationState.chatHistory.push({role: "user", content: transcript});
+                conversationState.chatHistory.push({role: "assistant", content: approvalPrompt});
+              } else {
+                await safeSendAudioResponse('Sorry, I could not send the approval request. Please try again later.');
+              }
+            } else {
+              await safeSendAudioResponse('Sorry, I cannot process this request without tracking ID verification.');
+            }
+          } catch (fcmError) {
+            console.error('[FCM ERROR in no tracking flow]:', fcmError);
+            await safeSendAudioResponse('Sorry, there was an error with the approval process. Please provide your tracking ID if you have it.');
+          }
+          
+          // Skip AI model call since we handled this internally
+          aiResponse = null;
+          
         } else {
-          // Invalid tracking ID
-          await safeSendAudioResponse(verificationResult.message);
+          // Try to verify the provided tracking ID
+          console.log(`[TRACKING DEBUG] About to verify tracking ID. CallSid: ${conversationState.callSid}, Company: ${conversationState.collected_info.company}`);
           
-          // Ask for tracking ID again or offer push notification alternative
-          const retryMessage = "Would you like to try another tracking ID, or shall I send a notification for approval?";
-          await safeSendAudioResponse(retryMessage);
+          const verificationResult = await smsVerificationService.verifyTrackingId(
+            transcript,
+            conversationState.collected_info.company,
+            conversationState.callSid
+          );
           
-          conversationState.chatHistory.push({role: "user", content: transcript});
-          conversationState.chatHistory.push({role: "assistant", content: verificationResult.message + " " + retryMessage});
+          if (verificationResult.verified) {
+            // Success! Share the OTP
+            const otpMessage = `Tracking ID verified! Your ${conversationState.collected_info.company} O T P is: ${formatOtpDigits(conversationState.found_otp)}`;
+            await safeSendAudioResponse(otpMessage);
+            
+            // Update conversation state
+            conversationState.conversation_stage = 'otp_provided';
+            conversationState.current_intent = 'otp_shared';
+            
+            // Add to chat history
+            conversationState.chatHistory.push({role: "user", content: transcript});
+            conversationState.chatHistory.push({role: "assistant", content: otpMessage});
+          } else {
+            // Invalid tracking ID - check if they want to request approval instead
+            if (lowerTranscript.includes('approval') || 
+                lowerTranscript.includes('notification') || 
+                lowerTranscript.includes('send notification') ||
+                lowerTranscript.includes('yes') && conversationState.conversation_stage === 'asking_tracking_id') {
+              
+              console.log(`[TRACKING VERIFICATION] User requested manual approval instead`);
+              
+              // Send push notification for manual approval - get FCM token from UserSettings
+              try {
+                const userSettings = await UserSettings.findOne({ 
+                  userId: conversationState.user._id 
+                });
+                
+                if (userSettings?.fcmToken) {
+                  const approvalResult = await smsVerificationService.requestUserApproval(
+                    conversationState.user._id,
+                    userSettings.fcmToken,
+                    conversationState.collected_info.company,
+                    conversationState.callLog?.callerNumber,
+                    conversationState.callSid
+                  );
+                  
+                  if (approvalResult.sent) {
+                    const approvalPrompt = `I've sent a notification for manual approval. Please wait while the recipient approves sharing the O T P.`;
+                    
+                    conversationState.conversation_stage = 'waiting_approval';
+                    conversationState.current_intent = 'awaiting_user_approval';
+                    conversationState.approval_id = approvalResult.approvalId;
+                    
+                    await safeSendAudioResponse(approvalPrompt);
+                    
+                    conversationState.chatHistory.push({role: "user", content: transcript});
+                    conversationState.chatHistory.push({role: "assistant", content: approvalPrompt});
+                  } else {
+                    await safeSendAudioResponse('Sorry, I could not send the approval request. Please try again later.');
+                  }
+                } else {
+                  await safeSendAudioResponse('Sorry, I cannot send approval notifications. Please provide your tracking ID to continue.');
+                }
+              } catch (fcmError) {
+                console.error('[FCM ERROR]:', fcmError);
+                await safeSendAudioResponse('Sorry, there was an error sending the approval request. Please provide your tracking ID to continue.');
+              }
+            } else {
+              // Just invalid tracking ID, ask to try again
+              await safeSendAudioResponse(verificationResult.message);
+              
+              // Ask for tracking ID again or offer push notification alternative
+              const retryMessage = "Would you like to try another tracking ID, or shall I send a notification for approval?";
+              await safeSendAudioResponse(retryMessage);
+              
+              conversationState.chatHistory.push({role: "user", content: transcript});
+              conversationState.chatHistory.push({role: "assistant", content: verificationResult.message + " " + retryMessage});
+            }
+          }
+          
+          // Skip AI model call since we handled this internally
+          aiResponse = null;
         }
-        
-        // Skip AI model call since we handled this internally
-        aiResponse = null;
         
       } else if (conversationState.conversation_stage === 'waiting_approval') {
         // Handle responses while waiting for approval
@@ -717,7 +922,7 @@ const checkForEmergency = async (transcript) => {
             
             // Share a mock OTP (in real implementation, this would come from SMS)
             const mockOTP = "123456";
-            const otpMessage = `Great! Your ${pendingApproval.company} OTP is: ${mockOTP.split('').join(' ')}`;
+            const otpMessage = `Great! Your ${pendingApproval.company} O T P is: ${formatOtpDigits(mockOTP)}`;
             
             await safeSendAudioResponse(otpMessage);
             
@@ -727,11 +932,11 @@ const checkForEmergency = async (transcript) => {
             conversationState.chatHistory.push({role: "user", content: transcript});
             conversationState.chatHistory.push({role: "assistant", content: otpMessage});
           } else {
-            await safeSendAudioResponse("I don't have any pending approval request. Please try requesting the OTP again.");
+            await safeSendAudioResponse("I don't have any pending approval request. Please try requesting the O T P again.");
           }
         } else {
           // Still waiting
-          await safeSendAudioResponse("I'm still waiting for you to approve the notification on your phone. Please check and approve if you want to share the OTP.");
+          await safeSendAudioResponse("I'm still waiting for you to approve the notification on your phone. Please check and approve if you want to share the O T P.");
         }
         
         aiResponse = null;
@@ -827,7 +1032,7 @@ const checkForEmergency = async (transcript) => {
             // Mark that we're ending the call to prevent further processing
             conversationState.isEndingCall = true;
             
-            await safeSendAudioResponse('Great! I\'ve shared your OTP. Have a nice day and enjoy your delivery!');
+            await safeSendAudioResponse('Great! I\'ve shared your O T P. Have a nice day and enjoy your delivery!');
             
             // Wait longer for the goodbye message to fully play (estimate ~5-6 seconds for full message)
             setTimeout(async () => {
