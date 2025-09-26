@@ -277,7 +277,7 @@ const handleWebSocketConnection = (ws, req) => {
         history: conversationState.chatHistory,
         conversation_stage: conversationState.conversation_stage
       };
-      const response = await axios.post('https://7cddf8c0f306.ngrok-free.app/generate', requestBody);
+      const response = await axios.post('http://localhost:5000/generate', requestBody);
       return response.data;
     } catch (error) {
       console.error('[API ERROR] Backend request failed:', error.response?.data || error.message);
