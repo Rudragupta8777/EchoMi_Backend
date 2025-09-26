@@ -26,6 +26,7 @@ app.use('/api/contacts', require('./routes/contactRoutes'));
 app.use('/api/logs', require('./routes/callLogRoutes'));
 app.use('/api/settings', require('./routes/userSettingsRoutes'));
 app.use('/api/sms', require('./routes/smsRoutes'));
+app.use('/api/otp', require('./routes/otpRoutes'));
 
 // Register Twilio status callback route (this is handled in the controller now)
 registerStatusRoute(app);
