@@ -43,10 +43,12 @@ class ConversationManager {
     const existed = this.activeConversations.delete(callSid);
     if (existed) {
       console.log(`[CONVERSATION MANAGER] ✅ Removed conversation for call: ${callSid}`);
+      console.log(`[CONVERSATION MANAGER] 📊 Remaining active conversations: ${this.activeConversations.size}`);
     } else {
       console.log(`[CONVERSATION MANAGER] ⚠️ Tried to remove non-existent conversation: ${callSid}`);
+      console.log(`[CONVERSATION MANAGER] 📊 Current active conversations: [${Array.from(this.activeConversations.keys()).join(', ') || 'none'}]`);
     }
-    console.log(`[CONVERSATION MANAGER] 📊 Remaining active conversations: ${this.activeConversations.size}`);
+    return existed;
   }
 
   /**

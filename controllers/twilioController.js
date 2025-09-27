@@ -12,6 +12,30 @@ const conversationManager = require('../services/conversationManager');
 const url = require('url');
 const { translateText } = require('../services/translationService');
 
+// Phone number formatting function
+const formatPhoneNumber = (twilioPhoneNumber) => {
+  if (!twilioPhoneNumber) return 'Unknown';
+  
+  // Remove +1 country code and format as (XXX) XXX-XXXX
+  const cleaned = twilioPhoneNumber.replace(/[^\d]/g, '');
+  
+  if (cleaned.length === 11 && cleaned.startsWith('1')) {
+    // US number with country code
+    const number = cleaned.substring(1);
+    return `(${number.substring(0, 3)}) ${number.substring(3, 6)}-${number.substring(6)}`;
+  } else if (cleaned.length === 10) {
+    // US number without country code
+    return `(${cleaned.substring(0, 3)}) ${cleaned.substring(3, 6)}-${cleaned.substring(6)}`;
+  } else if (cleaned.length === 12 && cleaned.startsWith('91')) {
+    // Indian number with country code
+    const number = cleaned.substring(2);
+    return `+91 ${number.substring(0, 5)} ${number.substring(5)}`;
+  } else {
+    // Return as-is for other formats
+    return twilioPhoneNumber;
+  }
+};
+
 // Role prompts
 const rolePrompts = {
   delivery: "You are an AI assistant for handling a delivery...",
@@ -93,10 +117,11 @@ const handleIncomingCall = async (req, res) => {
     const user = await User.findOne({ twilioPhoneNumber: req.body.To });
     if (!user) return res.status(400).send('User not found for this Twilio number');
 
-    // Create CallLog
+    // Create CallLog with formatted phone number
+    const formattedCallerNumber = formatPhoneNumber(callerNumber);
     const callLog = new CallLog({
       userId: user._id,
-      callerNumber,
+      callerNumber: formattedCallerNumber,
       callSid,
       startTime: new Date()
     });
@@ -204,8 +229,22 @@ const handleWebSocketConnection = (ws, req) => {
       // Format OTP for proper pronunciation before sending to TTS
       const formattedText = formatOtpForSpeech(text);
       
-      console.log(`[TTS] Sending response in ${responseLanguage}: "${formattedText}"`);
-      await sendAudioResponse(formattedText, responseLanguage);
+      // If language is Hindi but text is in English, translate it first
+      let finalText = formattedText;
+      if (responseLanguage === 'hi' && !/[\u0900-\u097F]/.test(formattedText)) {
+        console.log(`[TTS] Translating English text to Hindi: "${formattedText}"`);
+        try {
+          const translatedText = await translateText(formattedText, 'hi');
+          finalText = translatedText || formattedText;
+          console.log(`[TTS] Translation result: "${finalText}"`);
+        } catch (translateError) {
+          console.error('[TTS] Translation failed, using original text:', translateError);
+          finalText = formattedText;
+        }
+      }
+      
+      console.log(`[TTS] Sending response in ${responseLanguage}: "${finalText}"`);
+      await sendAudioResponse(finalText, responseLanguage);
     } catch (error) {
       console.error('Error in safeSendAudioResponse:', error);
     }
@@ -213,6 +252,47 @@ const handleWebSocketConnection = (ws, req) => {
 
   // Add safeSendAudioResponse to conversation state for use by resume service
   conversationState.safeSendAudioResponse = safeSendAudioResponse;
+
+  // Handle OTP request when delivery person arrives
+  const handleOTPRequest = async (company) => {
+    try {
+      console.log(`[OTP REQUEST] Processing OTP request for ${company}`);
+      
+      const smsResult = await smsVerificationService.checkForOTP(conversationState.user._id, company, conversationState.callSid);
+      
+      if (smsResult.found) {
+        console.log(`[OTP REQUEST] ✅ Found OTP: ${smsResult.otp}`);
+        conversationState.found_otp = smsResult.otp;
+        
+        const responseText = conversationState.language === 'hi' 
+          ? `बहुत अच्छा! मैंने आपका ${company} ओ टी पी ढूंढा है। सुरक्षा के लिए, कृपया अपना ट्रैकिंग आई डी या ऑर्डर आई डी दें।`
+          : `Great! I found your ${company} O T P. For security, please provide your tracking ID or order ID to verify this delivery.`;
+        
+        conversationState.conversation_stage = 'asking_tracking_id';
+        conversationState.current_intent = 'verify_tracking';
+        
+        await safeSendAudioResponse(responseText);
+        
+      } else {
+        console.log(`[OTP REQUEST] ❌ No OTP found for ${company}`);
+        
+        const responseText = conversationState.language === 'hi'
+          ? `मुझे ${company} का ओ टी पी नहीं मिला। कृपया थोड़ा इंतज़ार करें या ओ टी पी मैन्युअल रूप से साझा करें।`
+          : `I couldn't find the ${company} O T P. Please wait a moment or share the O T P manually.`;
+        
+        await safeSendAudioResponse(responseText);
+      }
+      
+    } catch (error) {
+      console.error(`[OTP REQUEST] Error processing OTP request:`, error);
+      
+      const responseText = conversationState.language === 'hi'
+        ? `ओ टी पी खोजने में समस्या हो रही है। कृपया मैन्युअल रूप से ओ टी पी साझा करें।`
+        : `I'm having trouble finding the O T P. Please share the O T P manually.`;
+      
+      await safeSendAudioResponse(responseText);
+    }
+  };
 
   // Send audio to Twilio
   const sendAudioResponse = async (text, lang = 'en') => {
@@ -864,6 +944,22 @@ const checkForEmergency = async (transcript) => {
     conversationState.responseQueue = [];
 
     try {
+      // 0️⃣ Check for arrival when traveling to location
+      if (conversationState.conversation_stage === 'traveling_to_location') {
+        const arrivalKeywords = ['पहुंच गया', 'arrived', 'reached', 'here', 'यहाँ हूँ', 'आ गया', 'पहुँच गया'];
+        if (arrivalKeywords.some(keyword => transcript.toLowerCase().includes(keyword))) {
+          console.log('[ARRIVAL] Detected arrival, checking for OTP...');
+          conversationState.conversation_stage = 'checking_for_otp';
+          
+          // Immediately try to check for OTP
+          if (conversationState.collected_info.company) {
+            console.log(`[ARRIVAL] Triggering OTP check for ${conversationState.collected_info.company}`);
+            await handleOTPRequest(conversationState.collected_info.company);
+            return; // Let the OTP handling take over
+          }
+        }
+      }
+
       // 1️⃣ Emergency Detection
       await checkForEmergency(transcript);
 
@@ -892,13 +988,20 @@ const checkForEmergency = async (transcript) => {
         
         const lowerTranscript = transcript.toLowerCase();
         
-        // Check if delivery person says they don't have tracking ID
+        // Check if delivery person says they don't have tracking ID (English & Hindi)
         if (lowerTranscript.includes('no tracking') || 
             lowerTranscript.includes("don't have") || 
             lowerTranscript.includes("i don't know") ||
             lowerTranscript.includes('not available') ||
             lowerTranscript.includes('no order id') ||
-            lowerTranscript.includes('not given')) {
+            lowerTranscript.includes('not given') ||
+            // Hindi phrases for "I don't have"
+            transcript.includes('नहीं है') ||
+            transcript.includes('पास नहीं') ||
+            transcript.includes('मेरे पास नहीं') ||
+            transcript.includes('नहीं दिया') ||
+            transcript.includes('पता नहीं') ||
+            transcript.includes('मालूम नहीं')) {
           
           console.log(`[TRACKING VERIFICATION] Delivery person doesn't have tracking ID, requesting approval`);
           console.log(`[TRACKING VERIFICATION] 🔍 Debug Info:`, {
@@ -1258,10 +1361,7 @@ const checkForEmergency = async (transcript) => {
         break;
       case 'stop':
         console.log('📞 Twilio stop message received');
-        // Remove from active conversations before cleanup
-        if (conversationState.callSid) {
-          conversationManager.removeActiveConversation(conversationState.callSid);
-        }
+        // Cleanup will handle conversation removal
         cleanup();
         break;
     }
@@ -1273,8 +1373,8 @@ const checkForEmergency = async (transcript) => {
     conversationState.responseQueue = [];
     conversationState.isProcessingResponse = false;
     
-    // Remove from active conversations if callSid exists
-    if (conversationState.callSid) {
+    // Remove from active conversations if callSid exists and conversation is still active
+    if (conversationState.callSid && conversationManager.getActiveConversationByCallSid(conversationState.callSid)) {
       conversationManager.removeActiveConversation(conversationState.callSid);
     }
     

@@ -370,6 +370,15 @@ class SMSVerificationService {
           console.log(`[TRACKING VERIFICATION] Normalized provided ID: "${providedNormalized}"`);
           console.log(`[TRACKING VERIFICATION] Comparing provided: "${providedTrackingId}" (normalized: "${providedNormalized}") with extracted: [${trackingResult.trackingIds.join(', ')}]`);
           
+          // CRITICAL FIX: Don't allow empty or very short tracking IDs
+          if (!providedNormalized || providedNormalized.length < 4) {
+            console.log(`[TRACKING VERIFICATION] ❌ Provided tracking ID is empty or too short: "${providedNormalized}"`);
+            return {
+              verified: false,
+              message: "I couldn't understand the tracking ID. Let me send a notification for manual approval."
+            };
+          }
+          
           const isMatch = trackingResult.trackingIds.some(id => {
             const extractedNormalized = id.replace(/[^A-Z0-9]/gi, '').toUpperCase();
             console.log(`[TRACKING VERIFICATION] Comparing "${providedNormalized}" with "${extractedNormalized}"`);
