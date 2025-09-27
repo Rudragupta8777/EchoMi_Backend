@@ -9,30 +9,56 @@ const UserSettings = require('../models/UserSettings');
 // @access  Private (AI Model access)
 const getLatestSmsByCall = async (req, res) => {
     try {
-        const { callSid, limit = 20, storageType } = req.body;
+        const { callSid, userId, limit = 20, storageType } = req.body;
 
-        if (!callSid) {
+        // Require either callSid OR userId
+        if (!callSid && !userId) {
             return res.status(400).json({
                 success: false,
-                error: 'Call SID is required'
+                error: 'Either Call SID or User ID is required'
             });
         }
 
-        // Fetch latest SMS messages for this call
-        const smsMessages = await Sms.find({ callSid })
+        let query = {};
+        let responseKey = '';
+        
+        if (callSid) {
+            // Fetch messages for specific call
+            query = { callSid };
+            responseKey = 'callSid';
+            console.log(`[SMS CONTROLLER] Fetching SMS for callSid: ${callSid}`);
+        } else if (userId) {
+            // Fetch latest messages for user across all calls
+            query = { userId };
+            responseKey = 'userId';
+            console.log(`[SMS CONTROLLER] Fetching latest SMS for userId: ${userId}`);
+        }
+
+        // Add storage type filter if specified
+        if (storageType) {
+            query.storageType = storageType;
+        }
+
+        // Fetch latest SMS messages
+        const smsMessages = await Sms.find(query)
             .sort({ timestamp: -1 })
             .limit(parseInt(limit))
-            .select('phoneNumber message sender timestamp smsType storageType');
+            .select('phoneNumber message sender timestamp smsType storageType callSid');
 
-        // Mark SMS as processed since AI is using them
-        await SmsService.markSmsAsProcessed(callSid);
+        // Mark SMS as processed if we have a callSid
+        if (callSid) {
+            await SmsService.markSmsAsProcessed(callSid);
+        }
 
-        res.status(200).json({
+        const responseData = {
             success: true,
             count: smsMessages.length,
-            callSid: callSid,
             data: smsMessages
-        });
+        };
+        
+        responseData[responseKey] = callSid || userId;
+
+        res.status(200).json(responseData);
 
     } catch (error) {
         console.error('Error fetching SMS messages:', error);

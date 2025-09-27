@@ -7,34 +7,27 @@ class SMSVerificationService {
 
   async checkForOTP(userId, company, callSid = null) {
     try {
-      console.log(`[SMS SERVICE] Checking for ${company} OTP for user ${userId} - fetching from database`);
+      console.log(`[SMS SERVICE] Checking for ${company} OTP for user ${userId} - fetching latest messages`);
       
-      // Try to fetch real SMS messages from database first
+      // Try to fetch the most recent SMS messages for this user (not just this call)
       try {
         const smsEndpoint = `${process.env.SMS_ENDPOINT_URL || 'http://localhost:3000'}/api/sms/call/latest`;
-        console.log(`[SMS SERVICE] Fetching SMS from: ${smsEndpoint}`);
+        console.log(`[SMS SERVICE] Fetching latest SMS from: ${smsEndpoint}`);
         
         const requestBody = {
-          limit: 15
+          userId: userId,  // Fetch by userId to get all recent messages for this user
+          limit: 30       // Get more messages to ensure we find recent OTPs
         };
-        
-        // If we have callSid, use it for precise lookup
-        if (callSid) {
-          requestBody.callSid = callSid;
-        } else {
-          // Fallback to user ID if no callSid
-          requestBody.userId = userId;
-        }
         
         const smsResponse = await axios.post(smsEndpoint, requestBody);
 
         if (smsResponse.data.success && smsResponse.data.data && smsResponse.data.data.length > 0) {
-          console.log(`[SMS SERVICE]  Fetched ${smsResponse.data.data.length} real SMS messages from database`);
+          console.log(`[SMS SERVICE] ✅ Fetched ${smsResponse.data.data.length} SMS messages for user`);
           
           const otpResult = this.extractOTPFromMessages(smsResponse.data.data, company);
           
           if (otpResult.found) {
-            console.log(`[SMS SERVICE]  Found real OTP for ${company}: ${otpResult.otp}`);
+            console.log(`[SMS SERVICE] 🎯 Found real OTP for ${company}: ${otpResult.otp}`);
             return {
               found: true,
               otp: otpResult.otp,
@@ -45,14 +38,24 @@ class SMSVerificationService {
           }
         }
         
-        console.log(`[SMS SERVICE]  No OTP found in real SMS messages, falling back to simulation`);
+        console.log(`[SMS SERVICE] ❌ No OTP found in SMS messages`);
+        return {
+          found: false,
+          otp: null,
+          trackingRequired: false,
+          message: `No real OTP found for ${company}`,
+          source: 'none'
+        };
       } catch (smsError) {
         console.error(`[SMS SERVICE]  Error fetching real SMS: ${smsError.message}`);
-        console.log('[SMS SERVICE] Falling back to simulated OTPs');
+        return {
+          found: false,
+          otp: null,
+          trackingRequired: false,
+          message: `Error fetching OTP for ${company}`,
+          source: 'error'
+        };
       }
-      
-      // Fallback to simulated OTPs for development
-      return this.checkSimulatedOTP(company);
       
     } catch (error) {
       console.error('[SMS SERVICE] Critical error:', error);
@@ -65,34 +68,7 @@ class SMSVerificationService {
     }
   }
 
-  checkSimulatedOTP(company) {
-    const simulatedOTPs = {
-      'Amazon': '123456',
-      'Flipkart': '789012', 
-      'Zomato': '345678',
-      'Swiggy': '982784'
-    };
 
-    const foundOTP = simulatedOTPs[company] || simulatedOTPs[company?.toLowerCase()];
-      
-    if (foundOTP) {
-      console.log(`[SMS SERVICE]  Found simulated OTP for ${company}: ${foundOTP}`);
-      return {
-        found: true,
-        otp: foundOTP,
-        trackingRequired: true,
-        message: `Found simulated ${company} OTP: ${foundOTP}`,
-        source: 'simulation'
-      };
-    } else {
-      return {
-        found: false,
-        otp: null,
-        trackingRequired: false,
-        message: `No OTP found for ${company}`
-      };
-    }
-  }
 
   extractOTPFromMessages(messages, company) {
     try {
@@ -103,46 +79,94 @@ class SMSVerificationService {
       const companyLower = company?.toLowerCase() || '';
       console.log(`[SMS SERVICE] Looking for ${companyLower} OTP in ${messages.length} messages`);
       
-      for (const message of messages) {
+      // Sort messages by timestamp descending to prioritize most recent messages
+      const sortedMessages = messages.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      console.log(`[SMS SERVICE] 📅 Sorted messages by timestamp (newest first)`);
+      
+      for (const message of sortedMessages) {
         const messageText = message.message?.toLowerCase() || '';
         const sender = message.sender?.toLowerCase() || '';
         
-        console.log(`[SMS SERVICE] Checking message from ${message.sender}: "${message.message?.substring(0, 50)}..."`);
+        console.log(`[SMS SERVICE] Checking message from ${message.sender}: "${message.message?.substring(0, 80)}${message.message?.length > 80 ? '...' : ''}"`);
+        console.log(`[SMS SERVICE]   📅 Timestamp: ${new Date(message.timestamp).toLocaleString()}`);
         
+        // Enhanced company matching patterns
         const isRelevantMessage = 
           messageText.includes(companyLower) || 
           sender.includes(companyLower) ||
+          sender.includes('flipkart') ||
+          sender.includes('fk-') ||
+          sender.includes('flipkar') ||
+          (companyLower === 'flipkart' && (
+            messageText.includes('delivery') || 
+            messageText.includes('order') || 
+            messageText.includes('fk-') ||
+            messageText.includes('flipkar') ||
+            sender.includes('fk')
+          )) ||
           (companyLower === 'swiggy' && (messageText.includes('delivery') || messageText.includes('order'))) ||
           (companyLower === 'amazon' && messageText.includes('delivery')) ||
           (companyLower === 'zomato' && (messageText.includes('food') || messageText.includes('order')));
         
         if (isRelevantMessage) {
-          console.log(`[SMS SERVICE]  Relevant message found from ${message.sender}`);
+          console.log(`[SMS SERVICE]  ✅ Relevant ${company} message found from ${message.sender}`);
+          console.log(`[SMS SERVICE]  📱 Full message: "${message.message}"`);
           
+          // Enhanced OTP patterns - prioritize explicit OTP mentions
           const otpPatterns = [
-            /otp[:\s-]*(\d{4,8})/i,
-            /code[:\s-]*(\d{4,8})/i,
-            /verification[:\s-]*(\d{4,8})/i,
-            /pin[:\s-]*(\d{4,8})/i,
-            /\b(\d{4,8})\s*(?:is your|otp|code|pin)/i,
-            /\b(\d{6})\b/g
+            // Explicit OTP patterns (highest priority)
+            /otp[:\s\-]*(?:is[\s]*)?([\d]{4,8})/i,
+            /(?:otp|code)[:\s\-]*([\d]{4,8})/i,
+            /delivery[\s]*otp[:\s\-]*([\d]{4,8})/i,
+            
+            // Standard patterns
+            /verification[:\s\-]*([\d]{4,8})/i,
+            /pin[:\s\-]*([\d]{4,8})/i,
+            
+            // Reverse patterns with explicit keywords
+            /([\d]{4,8})[\s]*(?:is[\s]*(?:your[\s]*)?(?:otp|code|pin))/i,
+            
+            // Company specific patterns
+            /swiggy.*otp[:\s\-]*([\d]{4,8})/i,
+            /flipkart.*otp[:\s\-]*([\d]{4,8})/i,
+            /amazon.*otp[:\s\-]*([\d]{4,8})/i,
+            
+            // Last resort - generic patterns (only for known delivery messages)
+            /\b([\d]{4,6})\b/g
           ];
           
           for (const pattern of otpPatterns) {
             const match = messageText.match(pattern);
             if (match && match[1]) {
-              console.log(`[SMS SERVICE]  OTP FOUND: "${match[1]}" using pattern: ${pattern}`);
-              return { 
-                found: true, 
-                otp: match[1], 
-                message: message.message,
-                sender: message.sender 
-              };
+              const potentialOTP = match[1];
+              // Validate OTP - should be 4-8 digits and not look like phone/year/time
+              if (potentialOTP.length >= 4 && potentialOTP.length <= 8 && 
+                  !potentialOTP.startsWith('20') && // Not a year
+                  !potentialOTP.startsWith('19') && // Not a year  
+                  potentialOTP !== '1234' && // Not a test pattern
+                  potentialOTP !== '0000') {   // Not a null pattern
+                
+                console.log(`[SMS SERVICE]  🎯 LATEST OTP FOUND: "${potentialOTP}" from ${new Date(message.timestamp).toLocaleString()}`);
+                return { 
+                  found: true, 
+                  otp: potentialOTP, 
+                  message: message.message,
+                  sender: message.sender,
+                  timestamp: message.timestamp
+                };
+              }
             }
+          }
+        } else {
+          // For debugging - check if message contains any digits that could be OTPs
+          const hasDigits = /\d{4,6}/.test(messageText);
+          if (hasDigits) {
+            console.log(`[SMS SERVICE]  ⚠️  Message has digits but not flagged as relevant: "${message.message?.substring(0, 100)}"`);
           }
         }
       }
       
+      console.log(`[SMS SERVICE] ❌ No OTP found in ${messages.length} messages for ${company}`);
       return { found: false, otp: null };
     } catch (error) {
       console.error('[SMS SERVICE] OTP extraction error:', error);

@@ -485,9 +485,11 @@ const checkForEmergency = async (transcript) => {
                   aiResponse.intent = 'verify_tracking';
               } else {
                   console.log(`[OTP NOT FOUND] No ${company} OTP found in SMS messages`);
-                  aiResponse.response_text = `I checked your recent messages but couldn't find a ${company} O T P. Would you like me to ask for approval to share any available O T P?`;
-                  aiResponse.conversation_stage = 'checking_sms';
-                  aiResponse.intent = 'request_approval';
+                  // Gracefully end the call when no real OTP is found
+                  aiResponse.response_text = `I'm sorry, but I couldn't find any O T P for ${company} in your recent messages. Without a valid O T P, I cannot help with this delivery. Please contact ${company} directly for assistance. Thank you for calling. Goodbye!`;
+                  aiResponse.conversation_stage = 'call_ending';
+                  aiResponse.intent = 'end_call';
+                  aiResponse.end_call = true;
               }
           } else {
               console.log(`[OTP FOUND] Found ${company} OTP: ${smsResult.otp}`);
