@@ -8,6 +8,7 @@ const CallLog = require('../models/CallLog');
 const UserSettings = require('../models/UserSettings');
 const { sendEmergencyAlert, sendSmsFetchRequest } = require('../services/fcmService');
 const smsVerificationService = require('../services/smsVerificationService');
+const conversationManager = require('../services/conversationManager');
 const url = require('url');
 const { translateText } = require('../services/translationService');
 
@@ -143,6 +144,8 @@ const handleWebSocketConnection = (ws, req) => {
     callSid: null,
     user: null,
     callLog: null,
+    ws: ws, // Store the WebSocket connection
+    startTime: Date.now(), // Track conversation start time
   };
 
   // Fetch user and call data using callSid
@@ -193,21 +196,37 @@ const handleWebSocketConnection = (ws, req) => {
   };
 
   // Safe send audio response function
-  const safeSendAudioResponse = async (text, lang = 'en') => {
+  const safeSendAudioResponse = async (text, lang = null) => {
     try {
+      // Use provided language or fall back to conversation state language or default to 'en'
+      const responseLanguage = lang || conversationState.language || 'en';
+      
       // Format OTP for proper pronunciation before sending to TTS
       const formattedText = formatOtpForSpeech(text);
-      await sendAudioResponse(formattedText, lang);
+      
+      console.log(`[TTS] Sending response in ${responseLanguage}: "${formattedText}"`);
+      await sendAudioResponse(formattedText, responseLanguage);
     } catch (error) {
       console.error('Error in safeSendAudioResponse:', error);
     }
   };
 
+  // Add safeSendAudioResponse to conversation state for use by resume service
+  conversationState.safeSendAudioResponse = safeSendAudioResponse;
+
   // Send audio to Twilio
   const sendAudioResponse = async (text, lang = 'en') => {
     if (!text || !conversationState.streamSid) return;
     try {
-      let voiceLang = lang === 'hi' ? 'hi-IN' : lang;
+      // Convert language code for TTS service
+      let voiceLang = lang;
+      if (lang === 'hi') {
+        voiceLang = 'hi-IN'; // OpenAI TTS will handle Hindi
+        console.log(`[TTS] Converting "${text}" to Hindi speech using OpenAI (${voiceLang})`);
+      } else {
+        console.log(`[TTS] Converting "${text}" to ${voiceLang} speech using Deepgram`);
+      }
+      
       const audio = await textToSpeech(text, voiceLang);
       if (audio) {
         ws.send(JSON.stringify({
@@ -234,6 +253,8 @@ const handleWebSocketConnection = (ws, req) => {
 
     const userName = await getUserName();
     const greeting = `Hi! This is ${userName}'s AI assistant. How can I help you today?`;
+    
+    // Start with English greeting, language will be detected from user's first response
     await enqueueTTS(greeting, 'en');
   };
 
@@ -402,23 +423,83 @@ const checkForEmergency = async (transcript) => {
 
   // Detect language from transcript
   const detectLanguage = (text) => {
-    // Simple language detection based on script and common words
+    // Enhanced Hindi detection patterns
     const hindiPattern = /[\u0900-\u097F]/; // Devanagari script
-    const hindiWords = /\b(है|मेरे|पास|का|के|की|में|से|को|ने|और|यह|वह|आप|हम|तुम)\b/;
+    const hindiWords = /\b(है|हैं|मेरे|मेरा|पास|का|के|की|में|से|को|ने|और|यह|वह|आप|हम|तुम|हो|होगा|करना|करे|जी|हाँ|नहीं|क्या|कैसे|कहाँ|कब|डिलीवरी|पैकेज)\b/;
     
-    if (hindiPattern.test(text) || hindiWords.test(text)) {
-      return 'hi'; // Hindi detected
+    // More specific romanized Hindi patterns (avoid common English words)
+    const strongRomanHindi = /\b(haan|nahi|kya|kaise|kahan|aapko|hamara|tumhara|karo|karna|chahiye)\b/i;
+    const mediumRomanHindi = /\b(hai|mere|mera|aap|hum|tum)\b/i;
+    
+    // Check for Devanagari script (strongest indicator)
+    if (hindiPattern.test(text)) {
+      console.log(`[LANGUAGE] Hindi detected via Devanagari script`);
+      return 'hi';
     }
     
+    // Check for common Hindi words in Devanagari
+    if (hindiWords.test(text)) {
+      console.log(`[LANGUAGE] Hindi detected via Hindi words`);
+      return 'hi';
+    }
+    
+    // Check for strong romanized Hindi indicators
+    const strongMatches = text.match(strongRomanHindi);
+    if (strongMatches && strongMatches.length >= 1) {
+      console.log(`[LANGUAGE] Hindi detected via strong romanized text: ${strongMatches.join(', ')}`);
+      return 'hi';
+    }
+    
+    // Check for medium romanized Hindi indicators (need multiple)
+    const mediumMatches = text.match(mediumRomanHindi);
+    if (mediumMatches && mediumMatches.length >= 2) {
+      console.log(`[LANGUAGE] Hindi detected via multiple romanized indicators: ${mediumMatches.join(', ')}`);
+      return 'hi';
+    }
+    
+    // Check for combination: at least one medium + contains typical Hindi sentence structure
+    if (mediumMatches && mediumMatches.length >= 1) {
+      // Look for typical Hindi sentence patterns
+      const hindiPatterns = /\b(paas|wala|wali|ke liye|ki tarah|se)\b/i;
+      if (hindiPatterns.test(text)) {
+        console.log(`[LANGUAGE] Hindi detected via romanized word + Hindi pattern: ${mediumMatches.join(', ')}`);
+        return 'hi';
+      }
+    }
+    
+    console.log(`[LANGUAGE] English detected (default)`);
     return 'en'; // Default to English
   };
 
   // Generate AI response
   const generateAIResponse = async (transcript) => {
     try {
-      // Detect the caller's language
-      const detectedLanguage = detectLanguage(transcript);
-      console.log(`[LANGUAGE] Detected language: ${detectedLanguage} for text: "${transcript}"`);
+      // Detect the caller's language only if not already established
+      let currentLanguage = conversationState.language;
+      
+      if (!currentLanguage) {
+        // First time - detect and set the conversation language
+        const detectedLanguage = detectLanguage(transcript);
+        console.log(`[LANGUAGE] First detection: ${detectedLanguage} for text: "${transcript}"`);
+        conversationState.language = detectedLanguage;
+        currentLanguage = detectedLanguage;
+      } else {
+        // Language already established - only override if the new detection is very strong
+        const detectedLanguage = detectLanguage(transcript);
+        console.log(`[LANGUAGE] Current: ${currentLanguage}, Detected: ${detectedLanguage} for text: "${transcript}"`);
+        
+        // Only change language if:
+        // 1. Current is English and we detect strong Hindi indicators
+        // 2. Current is Hindi and we detect clear English-only text
+        if ((currentLanguage === 'en' && detectedLanguage === 'hi') ||
+            (currentLanguage === 'hi' && detectedLanguage === 'en' && !/[\u0900-\u097F]/.test(transcript))) {
+          console.log(`[LANGUAGE] Switching from ${currentLanguage} to ${detectedLanguage}`);
+          conversationState.language = detectedLanguage;
+          currentLanguage = detectedLanguage;
+        } else {
+          console.log(`[LANGUAGE] Maintaining conversation language: ${currentLanguage}`);
+        }
+      }
       
       const requestBody = {
         caller_role: conversationState.callerRole,
@@ -426,7 +507,8 @@ const checkForEmergency = async (transcript) => {
         history: conversationState.chatHistory,
         conversation_stage: conversationState.conversation_stage,
         collected_info: conversationState.collected_info || {}, // Pass existing collected info
-        call_sid: conversationState.callSid  // Include call SID for SMS requests
+        call_sid: conversationState.callSid,  // Include call SID for SMS requests
+        response_language: currentLanguage // Tell the AI model to respond in this language
       };
       
       console.log(`[AI REQUEST] Sending to AI model - Stage: ${conversationState.conversation_stage}, Collected Info:`, JSON.stringify(conversationState.collected_info, null, 2));
@@ -436,6 +518,17 @@ const checkForEmergency = async (transcript) => {
       // Post-process AI response to fix OTP pronunciation
       if (response.data.response_text) {
         response.data.response_text = formatOtpForSpeech(response.data.response_text);
+      }
+      
+      // Validate and clean AI response - remove fake/generated order IDs
+      if (response.data.collected_info && response.data.collected_info.order_id) {
+        const orderId = response.data.collected_info.order_id;
+        // Check if order ID looks like a UUID (AI-generated) and remove it
+        const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+        if (uuidPattern.test(orderId)) {
+          console.log(`[AI VALIDATION] Removing AI-generated fake order ID: ${orderId}`);
+          delete response.data.collected_info.order_id;
+        }
       }
       
       // Check if AI model is requesting SMS
@@ -470,7 +563,11 @@ const checkForEmergency = async (transcript) => {
               console.log('🔄 No SMS found for call, triggering fresh fetch');
               await triggerSmsFetchForCall(conversationState.user._id, conversationState.callSid, 'regular');
               
-              // Try again after triggering fetch
+              // Wait a moment for fresh data to arrive
+              console.log('⏳ Waiting 2 seconds for fresh SMS data...');
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              
+              // Try again after triggering fetch with increased limit
               const retryResult = await smsVerificationService.checkForOTP(conversationState.user._id, company, conversationState.callSid);
               if (retryResult.found) {
                   console.log(`[OTP FOUND ON RETRY] Found ${company} OTP: ${retryResult.otp}`);
@@ -484,12 +581,31 @@ const checkForEmergency = async (transcript) => {
                   aiResponse.conversation_stage = 'asking_tracking_id';
                   aiResponse.intent = 'verify_tracking';
               } else {
-                  console.log(`[OTP NOT FOUND] No ${company} OTP found in SMS messages`);
-                  // Gracefully end the call when no real OTP is found
-                  aiResponse.response_text = `I'm sorry, but I couldn't find any O T P for ${company} in your recent messages. Without a valid O T P, I cannot help with this delivery. Please contact ${company} directly for assistance. Thank you for calling. Goodbye!`;
-                  aiResponse.conversation_stage = 'call_ending';
-                  aiResponse.intent = 'end_call';
-                  aiResponse.end_call = true;
+                  console.log(`[OTP NOT FOUND] No ${company} OTP found in SMS messages after fresh fetch`);
+                  // Try one more aggressive fetch with emergency priority
+                  console.log('🚨 Triggering emergency SMS fetch as last resort...');
+                  await triggerSmsFetchForCall(conversationState.user._id, conversationState.callSid, 'emergency');
+                  
+                  // Wait longer for emergency fetch
+                  await new Promise(resolve => setTimeout(resolve, 3000));
+                  
+                  // Final attempt
+                  const finalResult = await smsVerificationService.checkForOTP(conversationState.user._id, company, conversationState.callSid);
+                  if (finalResult.found) {
+                      console.log(`[OTP FOUND ON FINAL RETRY] Found ${company} OTP: ${finalResult.otp}`);
+                      conversationState.found_otp = finalResult.otp;
+                      aiResponse.otp_found = true;
+                      aiResponse.otp_value = finalResult.otp;
+                      aiResponse.response_text = `Great! I found your ${company} O T P. For security, please provide your tracking ID or order ID to verify this delivery.`;
+                      aiResponse.conversation_stage = 'asking_tracking_id';
+                      aiResponse.intent = 'verify_tracking';
+                  } else {
+                      // Gracefully end the call when no real OTP is found
+                      aiResponse.response_text = `I'm sorry, but I couldn't find any recent O T P for ${company} in your messages, even after checking for the latest data. Without a valid O T P, I cannot help with this delivery. Please contact ${company} directly for assistance. Thank you for calling. Goodbye!`;
+                      aiResponse.conversation_stage = 'call_ending';
+                      aiResponse.intent = 'end_call';
+                      aiResponse.end_call = true;
+                  }
               }
           } else {
               console.log(`[OTP FOUND] Found ${company} OTP: ${smsResult.otp}`);
@@ -506,7 +622,7 @@ const checkForEmergency = async (transcript) => {
 
           // Try to fetch actual SMS messages for additional context (but don't depend on it)
           try {
-              const smsResponse = await axios.post('https://6706aab6dac3.ngrok-free.app/api/sms/call/latest', {
+              const smsResponse = await axios.post('https://ff437a8586e7.ngrok-free.app/api/sms/call/latest', {
                   callSid: conversationState.callSid,
                   limit: 20
               });
@@ -785,14 +901,26 @@ const checkForEmergency = async (transcript) => {
             lowerTranscript.includes('not given')) {
           
           console.log(`[TRACKING VERIFICATION] Delivery person doesn't have tracking ID, requesting approval`);
+          console.log(`[TRACKING VERIFICATION] 🔍 Debug Info:`, {
+            userId: conversationState.user._id,
+            company: conversationState.collected_info.company,
+            callSid: conversationState.callSid,
+            callerNumber: conversationState.callLog?.callerNumber
+          });
           
           // Send push notification for manual approval - get FCM token from UserSettings
           try {
+            console.log(`[APPROVAL FLOW] 📋 Looking up user settings for userId: ${conversationState.user._id}`);
             const userSettings = await UserSettings.findOne({ 
               userId: conversationState.user._id 
             });
             
+            console.log(`[APPROVAL FLOW] 🔍 User settings found:`, userSettings ? 'Yes' : 'No');
+            console.log(`[APPROVAL FLOW] 📱 FCM Token:`, userSettings?.fcmToken ? `Present (${userSettings.fcmToken.length} chars)` : 'Missing');
+            
             if (userSettings?.fcmToken) {
+              console.log(`[APPROVAL FLOW] � Initiating FCM approval request for ${conversationState.collected_info.company} OTP`);
+              
               const approvalResult = await smsVerificationService.requestUserApproval(
                 conversationState.user._id,
                 userSettings.fcmToken,
@@ -801,8 +929,10 @@ const checkForEmergency = async (transcript) => {
                 conversationState.callSid
               );
               
+              console.log(`[APPROVAL FLOW] 📤 Approval result:`, approvalResult);
+              
               if (approvalResult.sent) {
-                const approvalPrompt = `I understand you don't have the tracking ID. I've sent a notification for manual approval. Please wait while the recipient approves sharing the O T P.`;
+                const approvalPrompt = `I understand you don't have the tracking ID. I've sent a priority notification for manual approval. Please wait while the recipient approves sharing the O T P.`;
                 
                 conversationState.conversation_stage = 'waiting_approval';
                 conversationState.current_intent = 'awaiting_user_approval';
@@ -812,10 +942,14 @@ const checkForEmergency = async (transcript) => {
                 
                 conversationState.chatHistory.push({role: "user", content: transcript});
                 conversationState.chatHistory.push({role: "assistant", content: approvalPrompt});
+                
+                console.log(`[APPROVAL FLOW] ✅ Approval notification sent successfully with ID: ${approvalResult.approvalId}`);
               } else {
+                console.error(`[APPROVAL FLOW] ❌ Failed to send approval notification:`, approvalResult.error);
                 await safeSendAudioResponse('Sorry, I could not send the approval request. Please try again later.');
               }
             } else {
+              console.warn(`[APPROVAL FLOW] ⚠️ No FCM token found for user - cannot send approval notification`);
               await safeSendAudioResponse('Sorry, I cannot process this request without tracking ID verification.');
             }
           } catch (fcmError) {
@@ -951,7 +1085,8 @@ const checkForEmergency = async (transcript) => {
       if (aiResponse) {
         // 4️⃣ Send AI audio response in the same language as the caller
         if (aiResponse.response_text) {
-          const responseLanguage = aiResponse.language || 'en'; // Use detected language
+          // Use stored conversation language for consistency
+          const responseLanguage = conversationState.language || aiResponse.language || 'en';
           console.log(`[TTS] Responding in language: ${responseLanguage}`);
           await safeSendAudioResponse(aiResponse.response_text, responseLanguage);
         }
@@ -1098,6 +1233,7 @@ const checkForEmergency = async (transcript) => {
         });
         
         conversationState.streamSid = msg.start.streamSid;
+        conversationState.callSid = msg.start.callSid; // Store callSid
         conversationState.sttService = new SttService();
         conversationState.sttService.on('speech_transcribed', onTranscript);
         
@@ -1105,6 +1241,9 @@ const checkForEmergency = async (transcript) => {
           const initialized = await initializeCallData(msg.start.callSid);
           if (!initialized) {
             console.error('❌ Failed to initialize call data');
+          } else {
+            // Store the active conversation for OTP approval resume
+            conversationManager.storeActiveConversation(msg.start.callSid, conversationState);
           }
         } else {
           console.error('❌ No callSid in Twilio start message');
@@ -1119,6 +1258,10 @@ const checkForEmergency = async (transcript) => {
         break;
       case 'stop':
         console.log('📞 Twilio stop message received');
+        // Remove from active conversations before cleanup
+        if (conversationState.callSid) {
+          conversationManager.removeActiveConversation(conversationState.callSid);
+        }
         cleanup();
         break;
     }
@@ -1129,9 +1272,16 @@ const checkForEmergency = async (transcript) => {
     conversationState.sttService = null;
     conversationState.responseQueue = [];
     conversationState.isProcessingResponse = false;
+    
+    // Remove from active conversations if callSid exists
+    if (conversationState.callSid) {
+      conversationManager.removeActiveConversation(conversationState.callSid);
+    }
+    
     conversationState.callSid = null;
     conversationState.user = null;
     conversationState.callLog = null;
+    conversationState.ws = null;
   };
 
   ws.on('close', cleanup);

@@ -1,4 +1,5 @@
 ﻿const axios = require('axios');
+const { sendOTPApprovalRequest } = require('./fcmService');
 
 class SMSVerificationService {
   constructor() {
@@ -16,13 +17,21 @@ class SMSVerificationService {
         
         const requestBody = {
           userId: userId,  // Fetch by userId to get all recent messages for this user
-          limit: 30       // Get more messages to ensure we find recent OTPs
+          limit: 50,      // Increased limit to get more recent messages
+          forceFresh: true // Request fresh data from mobile app if needed
         };
         
         const smsResponse = await axios.post(smsEndpoint, requestBody);
 
         if (smsResponse.data.success && smsResponse.data.data && smsResponse.data.data.length > 0) {
           console.log(`[SMS SERVICE] ✅ Fetched ${smsResponse.data.data.length} SMS messages for user`);
+          
+          // Log the timestamps of the latest messages to verify freshness
+          const latest5 = smsResponse.data.data.slice(0, 5);
+          console.log(`[SMS SERVICE] 📅 Latest 5 message timestamps:`);
+          latest5.forEach((msg, idx) => {
+            console.log(`[SMS SERVICE]   ${idx + 1}. ${new Date(msg.timestamp).toLocaleString()} - ${msg.sender}: "${msg.message.substring(0, 50)}..."`);
+          });
           
           const otpResult = this.extractOTPFromMessages(smsResponse.data.data, company);
           
@@ -80,8 +89,15 @@ class SMSVerificationService {
       console.log(`[SMS SERVICE] Looking for ${companyLower} OTP in ${messages.length} messages`);
       
       // Sort messages by timestamp descending to prioritize most recent messages
-      const sortedMessages = messages.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-      console.log(`[SMS SERVICE] 📅 Sorted messages by timestamp (newest first)`);
+      const sortedMessages = messages.sort((a, b) => {
+        const timeA = new Date(a.timestamp);
+        const timeB = new Date(b.timestamp);
+        return timeB - timeA; // Newest first
+      });
+      console.log(`[SMS SERVICE] 📅 Sorted ${sortedMessages.length} messages by timestamp (newest first)`);
+      
+      // Track all potential OTPs found to prioritize by recency and company match
+      const foundOTPs = [];
       
       for (const message of sortedMessages) {
         const messageText = message.message?.toLowerCase() || '';
@@ -90,23 +106,41 @@ class SMSVerificationService {
         console.log(`[SMS SERVICE] Checking message from ${message.sender}: "${message.message?.substring(0, 80)}${message.message?.length > 80 ? '...' : ''}"`);
         console.log(`[SMS SERVICE]   📅 Timestamp: ${new Date(message.timestamp).toLocaleString()}`);
         
-        // Enhanced company matching patterns
+        // Enhanced company matching patterns - STRICT matching to prevent cross-company confusion
         const isRelevantMessage = 
           messageText.includes(companyLower) || 
           sender.includes(companyLower) ||
-          sender.includes('flipkart') ||
-          sender.includes('fk-') ||
-          sender.includes('flipkar') ||
+          
+          // Flipkart specific patterns
           (companyLower === 'flipkart' && (
-            messageText.includes('delivery') || 
-            messageText.includes('order') || 
+            sender.includes('fk-') ||
+            sender.includes('flipkar') ||
+            sender.includes('fk') ||
             messageText.includes('fk-') ||
             messageText.includes('flipkar') ||
-            sender.includes('fk')
+            (messageText.includes('delivery') && (messageText.includes('flipkart') || sender.includes('flipkart'))) ||
+            (messageText.includes('order') && (messageText.includes('flipkart') || sender.includes('flipkart')))
           )) ||
-          (companyLower === 'swiggy' && (messageText.includes('delivery') || messageText.includes('order'))) ||
-          (companyLower === 'amazon' && messageText.includes('delivery')) ||
-          (companyLower === 'zomato' && (messageText.includes('food') || messageText.includes('order')));
+          
+          // Swiggy specific patterns  
+          (companyLower === 'swiggy' && (
+            (messageText.includes('delivery') && (messageText.includes('swiggy') || sender.includes('swiggy'))) ||
+            (messageText.includes('order') && (messageText.includes('swiggy') || sender.includes('swiggy')))
+          )) ||
+          
+          // Amazon specific patterns
+          (companyLower === 'amazon' && (
+            (messageText.includes('delivery') && (messageText.includes('amazon') || sender.includes('amazon'))) ||
+            (messageText.includes('order') && (messageText.includes('amazon') || sender.includes('amazon'))) ||
+            sender.includes('amzn') ||
+            messageText.includes('amzn')
+          )) ||
+          
+          // Zomato specific patterns
+          (companyLower === 'zomato' && (
+            (messageText.includes('food') && (messageText.includes('zomato') || sender.includes('zomato'))) ||
+            (messageText.includes('order') && (messageText.includes('zomato') || sender.includes('zomato')))
+          ));
         
         if (isRelevantMessage) {
           console.log(`[SMS SERVICE]  ✅ Relevant ${company} message found from ${message.sender}`);
@@ -114,7 +148,9 @@ class SMSVerificationService {
           
           // Enhanced OTP patterns - prioritize explicit OTP mentions
           const otpPatterns = [
-            // Explicit OTP patterns (highest priority)
+            // Explicit OTP patterns (highest priority) - company-specific
+            new RegExp(`${companyLower}.*otp[:\\s\\-]*(\\d{4,8})`, 'i'),
+            new RegExp(`otp.*${companyLower}[:\\s\\-]*(\\d{4,8})`, 'i'),
             /otp[:\s\-]*(?:is[\s]*)?([\d]{4,8})/i,
             /(?:otp|code)[:\s\-]*([\d]{4,8})/i,
             /delivery[\s]*otp[:\s\-]*([\d]{4,8})/i,
@@ -125,11 +161,6 @@ class SMSVerificationService {
             
             // Reverse patterns with explicit keywords
             /([\d]{4,8})[\s]*(?:is[\s]*(?:your[\s]*)?(?:otp|code|pin))/i,
-            
-            // Company specific patterns
-            /swiggy.*otp[:\s\-]*([\d]{4,8})/i,
-            /flipkart.*otp[:\s\-]*([\d]{4,8})/i,
-            /amazon.*otp[:\s\-]*([\d]{4,8})/i,
             
             // Last resort - generic patterns (only for known delivery messages)
             /\b([\d]{4,6})\b/g
@@ -146,14 +177,18 @@ class SMSVerificationService {
                   potentialOTP !== '1234' && // Not a test pattern
                   potentialOTP !== '0000') {   // Not a null pattern
                 
-                console.log(`[SMS SERVICE]  🎯 LATEST OTP FOUND: "${potentialOTP}" from ${new Date(message.timestamp).toLocaleString()}`);
-                return { 
-                  found: true, 
-                  otp: potentialOTP, 
+                // Store potential OTP with priority scoring
+                const priority = this.calculateOTPPriority(pattern, messageText, potentialOTP, message.timestamp);
+                foundOTPs.push({
+                  otp: potentialOTP,
                   message: message.message,
                   sender: message.sender,
-                  timestamp: message.timestamp
-                };
+                  timestamp: message.timestamp,
+                  priority: priority
+                });
+                
+                console.log(`[SMS SERVICE]  🔍 Found potential OTP "${potentialOTP}" (priority: ${priority}) from ${new Date(message.timestamp).toLocaleString()}`);
+                break; // Move to next message after finding first OTP in this message
               }
             }
           }
@@ -166,12 +201,49 @@ class SMSVerificationService {
         }
       }
       
+      // If we found multiple OTPs, return the highest priority one
+      if (foundOTPs.length > 0) {
+        const bestOTP = foundOTPs.sort((a, b) => b.priority - a.priority)[0];
+        console.log(`[SMS SERVICE] 🎯 SELECTED BEST OTP: "${bestOTP.otp}" from ${new Date(bestOTP.timestamp).toLocaleString()} (priority: ${bestOTP.priority})`);
+        console.log(`[SMS SERVICE] 🏆 Total OTPs found: ${foundOTPs.length}, selected highest priority`);
+        
+        return { 
+          found: true, 
+          otp: bestOTP.otp, 
+          message: bestOTP.message,
+          sender: bestOTP.sender,
+          timestamp: bestOTP.timestamp
+        };
+      }
+      
       console.log(`[SMS SERVICE] ❌ No OTP found in ${messages.length} messages for ${company}`);
       return { found: false, otp: null };
     } catch (error) {
       console.error('[SMS SERVICE] OTP extraction error:', error);
       return { found: false, otp: null };
     }
+  }
+
+  // Calculate OTP priority based on pattern match and recency
+  calculateOTPPriority(pattern, messageText, otp, timestamp) {
+    let priority = 0;
+    
+    // Recency score (newer messages get higher priority)
+    const now = new Date();
+    const messageTime = new Date(timestamp);
+    const ageMinutes = (now - messageTime) / (1000 * 60);
+    const recencyScore = Math.max(0, 100 - ageMinutes); // 100 for immediate, decreases with age
+    
+    // Pattern specificity score
+    if (pattern.source.includes('otp')) priority += 50;
+    if (pattern.source.includes('delivery')) priority += 30;
+    if (pattern.source.includes('verification')) priority += 20;
+    
+    // OTP length score (6 digits is most common)
+    if (otp.length === 6) priority += 20;
+    else if (otp.length === 4) priority += 15;
+    
+    return priority + recencyScore;
   }
 
   // Extract tracking IDs from SMS messages
@@ -346,14 +418,50 @@ class SMSVerificationService {
   }
 
   async requestUserApproval(userId, fcmToken, company, callerNumber, callSid) {
-    const approvalId = `approval_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    this.pendingApprovals.set(approvalId, {
-      userId, company, callerNumber, callSid,
-      status: 'pending', timestamp: Date.now(), fcmToken
-    });
-    
-    return { sent: true, approvalId, message: `Approval request sent for ${company} OTP` };
+    try {
+      const approvalId = `approval_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      console.log(`[APPROVAL REQUEST] 🔍 Creating approval request: ${approvalId} for ${company}`);
+      console.log(`[APPROVAL REQUEST] 📱 FCM Token available: ${fcmToken ? 'Yes' : 'No'}`);
+      console.log(`[APPROVAL REQUEST] 📞 Caller: ${callerNumber}, CallSid: ${callSid}`);
+      
+      // Store the approval request
+      this.pendingApprovals.set(approvalId, {
+        userId, company, callerNumber, callSid,
+        status: 'pending', timestamp: Date.now(), fcmToken
+      });
+      
+      console.log(`[APPROVAL REQUEST] 🔔 Sending FCM notification for ${company} OTP approval...`);
+      
+      // Send the actual FCM notification
+      const fcmResult = await sendOTPApprovalRequest(fcmToken, {
+        company: company,
+        callerNumber: callerNumber,
+        callSid: callSid,
+        approvalId: approvalId
+      });
+      
+      console.log(`[APPROVAL REQUEST] ✅ FCM notification sent successfully:`, fcmResult);
+      return { 
+        sent: true, 
+        approvalId, 
+        message: `Approval request sent for ${company} OTP`,
+        fcmResponse: fcmResult 
+      };
+      
+    } catch (error) {
+      console.error(`[APPROVAL REQUEST] ❌ Failed to send FCM approval notification:`, error);
+      console.error(`[APPROVAL REQUEST] Error details:`, {
+        code: error.code,
+        message: error.message,
+        stack: error.stack
+      });
+      return { 
+        sent: false, 
+        error: error.message,
+        message: `Failed to send approval request for ${company} OTP` 
+      };
+    }
   }
 
   async processUserResponse(approvalId, approved, userId = null) {
@@ -392,6 +500,22 @@ class SMSVerificationService {
       expired,
       timestamp: new Date(request.timestamp),
       company: request.company
+    };
+  }
+
+  getPendingApprovalByApprovalId(approvalId) {
+    const request = this.pendingApprovals.get(approvalId);
+    if (!request) {
+      console.log(`[SMS SERVICE] No pending approval found for: ${approvalId}`);
+      return null;
+    }
+    
+    return {
+      approvalId: approvalId,
+      company: request.company,
+      callSid: request.callSid,
+      userId: request.userId,
+      timestamp: request.timestamp
     };
   }
 }

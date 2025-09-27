@@ -9,7 +9,13 @@ const UserSettings = require('../models/UserSettings');
 // @access  Private (AI Model access)
 const getLatestSmsByCall = async (req, res) => {
     try {
-        const { callSid, userId, limit = 20, storageType } = req.body;
+        const { callSid, userId, limit = 50, storageType, forceFresh } = req.body;
+        
+        // If requesting fresh data and we have userId, trigger new SMS fetch
+        if (forceFresh && userId) {
+            console.log(`[SMS CONTROLLER] 🔄 Fresh data requested - triggering new SMS fetch for user: ${userId}`);
+            // Note: This would require implementing a way to request fresh SMS from mobile app
+        }
 
         // Require either callSid OR userId
         if (!callSid && !userId) {
@@ -39,11 +45,13 @@ const getLatestSmsByCall = async (req, res) => {
             query.storageType = storageType;
         }
 
-        // Fetch latest SMS messages
+        // Fetch latest SMS messages - force newest first
         const smsMessages = await Sms.find(query)
-            .sort({ timestamp: -1 })
+            .sort({ timestamp: -1, _id: -1 }) // Sort by timestamp AND _id for true latest-first
             .limit(parseInt(limit))
             .select('phoneNumber message sender timestamp smsType storageType callSid');
+            
+        console.log(`[SMS CONTROLLER] 📊 Found ${smsMessages.length} messages, latest timestamp: ${smsMessages.length > 0 ? new Date(smsMessages[0].timestamp).toLocaleString() : 'none'}`);
 
         // Mark SMS as processed if we have a callSid
         if (callSid) {

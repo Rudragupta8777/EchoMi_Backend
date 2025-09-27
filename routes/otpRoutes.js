@@ -1,35 +1,62 @@
 ﻿const express = require('express');
 const router = express.Router();
 const smsVerificationService = require('../services/smsVerificationService');
+const { resumeConversationAfterApproval } = require('../services/conversationResumeService');
 
 router.post('/approve', async (req, res) => {
     try {
         const { approvalId, approved, userId } = req.body;
+        console.log(`[OTP APPROVAL] 📥 Received approval: ${approvalId}, approved: ${approved}, userId: ${userId}`);
+        
         if (!approvalId) {
             return res.status(400).json({ 
                 success: false, 
                 error: 'Approval ID is required' 
             });
         }
+        
         const result = await smsVerificationService.processUserResponse(
             approvalId, 
             approved === true || approved === 'true',
             userId
         );
+        
         if (result.success) {
+            console.log(`[OTP APPROVAL] ✅ User ${approved ? 'approved' : 'rejected'} OTP sharing for ${result.company}`);
+            
+            // CRITICAL: Resume the conversation if approved
+            if (approved === true || approved === 'true') {
+                console.log(`[OTP APPROVAL] 🔄 Attempting to resume conversation for approval: ${approvalId}`);
+                
+                try {
+                    const resumeResult = await resumeConversationAfterApproval(approvalId, result.company);
+                    if (resumeResult.success) {
+                        console.log(`[OTP APPROVAL] ✅ Conversation resumed successfully: ${resumeResult.message}`);
+                    } else {
+                        console.error(`[OTP APPROVAL] ❌ Failed to resume conversation: ${resumeResult.error}`);
+                    }
+                } catch (resumeError) {
+                    console.error(`[OTP APPROVAL] ❌ Error during conversation resume:`, resumeError);
+                }
+            } else {
+                console.log(`[OTP APPROVAL] 🚫 OTP sharing rejected, not resuming conversation`);
+            }
+            
             res.status(200).json({
                 success: true,
                 message: result.message,
-                action: result.action
+                action: result.action,
+                company: result.company
             });
         } else {
+            console.log(`[OTP APPROVAL] ❌ Approval processing failed: ${result.message}`);
             res.status(404).json({
                 success: false,
                 error: result.error || 'Approval not found or expired'
             });
         }
     } catch (error) {
-        console.error('[OTP ROUTES] Error processing approval:', error);
+        console.error('[OTP ROUTES] ❌ Error processing approval:', error);
         res.status(500).json({
             success: false,
             error: 'Internal server error processing approval'
