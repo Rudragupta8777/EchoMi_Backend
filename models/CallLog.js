@@ -1,49 +1,60 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const CallLogSchema = new mongoose.Schema({
-    userId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+  callerNumber: {
+    type: String,
+    required: true,
+  },
+  callSid: {
+    type: String,
+    required: true,
+    unique: true,
+  },
+  startTime: {
+    type: Date,
+    required: true,
+  },
+  duration: {
+    type: Number,
+    default: 0,
+  },
+  summary: {
+    type: String,
+  },
+  summaryGeneratedAt: {
+    type: Date,
+  },
+  summaryError: {
+    type: String,
+  },
+  summaryAttemptedAt: {
+    type: Date,
+  },
+  recordingUrl: {
+    type: String,
+  },
+  transcript: [
+    {
+      speaker: {
+        type: String,
+        enum: ["caller", "ai"],
         required: true,
-    },
-    callerNumber: {
+      },
+      text: {
         type: String,
         required: true,
-    },
-    callSid: {
-        type: String,
-        required: true,
-        unique: true,
-    },
-    startTime: {
+      },
+      timestamp: {
         type: Date,
-        required: true,
+        default: Date.now,
+      },
     },
-    duration: {
-        type: Number,
-        default: 0,
-    },
-    summary: {
-        type: String,
-    },
-    recordingUrl: {
-        type: String,
-    },
-    transcript: [{
-        speaker: {
-            type: String,
-            enum: ['caller', 'ai'],
-            required: true,
-        },
-        text: {
-            type: String,
-            required: true,
-        },
-        timestamp: {
-            type: Date,
-            default: Date.now,
-        },
-    }],
+  ],
 });
 
-module.exports = mongoose.model('CallLog', CallLogSchema);
+module.exports = mongoose.model("CallLog", CallLogSchema);
