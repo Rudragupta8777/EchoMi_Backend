@@ -154,7 +154,8 @@ const handleIncomingCall = async (req, res) => {
     );
 
     const connect = twiml.connect();
-    connect.stream({ url: `wss://${req.headers.host}/` });
+    const publicHost = req.headers['x-forwarded-host'] || req.headers.host;
+    connect.stream({ url: `wss://${publicHost}/` });
 
     res.type("text/xml");
     res.send(twiml.toString());
