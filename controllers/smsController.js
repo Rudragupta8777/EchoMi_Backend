@@ -144,7 +144,7 @@ const storeCallSms = async (req, res) => {
 // @access  Private
 const triggerSmsFetch = async (req, res) => {
     try {
-        const { userId, callSid, storageType = 'regular', limit = 20 } = req.body;
+        const { userId, callSid, storageType = 'regular', limit = 50 } = req.body;
 
         if (!userId || !callSid) {
             return res.status(400).json({

@@ -31,7 +31,7 @@ class SmsService {
     }
 
     // Get latest SMS for a specific call (with optional type filter)
-    async getLatestSmsByCall(callSid, limit = 20, storageType = null) {
+    async getLatestSmsByCall(callSid, limit = 50, storageType = null) {
         try {
             let query = { callSid };
             if (storageType) {

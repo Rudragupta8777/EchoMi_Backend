@@ -66,7 +66,7 @@ Please respond with ONLY the summary, not a conversational response.`,
       // Call AI model for summary (using your existing AI endpoint)
       const AI_MODEL_URL =
         process.env.AI_MODEL_URL ||
-        "https://e3b4379e4c73.ngrok-free.app/generate";
+        "http://localhost:8000/generate";
       const response = await axios.post(AI_MODEL_URL, summaryRequest, {
         timeout: 30000, // 30 second timeout
         headers: {

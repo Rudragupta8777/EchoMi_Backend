@@ -6,12 +6,14 @@ const { textToSpeech } = require("../services/ttsService");
 const User = require("../models/User");
 const CallLog = require("../models/CallLog");
 const UserSettings = require("../models/UserSettings");
+const Sms = require("../models/Sms");
 const {
   sendEmergencyAlert,
   sendSmsFetchRequest,
 } = require("../services/fcmService");
 const smsVerificationService = require("../services/smsVerificationService");
 const conversationManager = require("../services/conversationManager");
+const conversationFlowService = require("../services/conversationFlowService");
 const SummaryService = require("../services/summaryService");
 const url = require("url");
 const { translateText } = require("../services/translationService");
@@ -28,13 +30,13 @@ const formatPhoneNumber = (twilioPhoneNumber) => {
     const number = cleaned.substring(1);
     return `(${number.substring(0, 3)}) ${number.substring(
       3,
-      6
+      6,
     )}-${number.substring(6)}`;
   } else if (cleaned.length === 10) {
     // US number without country code
     return `(${cleaned.substring(0, 3)}) ${cleaned.substring(
       3,
-      6
+      6,
     )}-${cleaned.substring(6)}`;
   } else if (cleaned.length === 12 && cleaned.startsWith("91")) {
     // Indian number with country code
@@ -70,7 +72,7 @@ const saveTranscriptToMongo = async (callSid, newMessage, role) => {
           },
         },
       },
-      { new: true }
+      { new: true },
     );
 
     if (result) {
@@ -88,11 +90,11 @@ const saveTranscriptToMongo = async (callSid, newMessage, role) => {
 const triggerSmsFetchForCall = async (
   userId,
   callSid,
-  storageType = "regular"
+  storageType = "regular",
 ) => {
   try {
     console.log(
-      `📱 Triggering SMS fetch for call ${callSid}, user ${userId}, type: ${storageType}`
+      `📱 Triggering SMS fetch for call ${callSid}, user ${userId}, type: ${storageType}`,
     );
 
     // Get user's FCM token
@@ -107,7 +109,7 @@ const triggerSmsFetchForCall = async (
       callSid: callSid.toString(),
       userId: userId.toString(), // Convert ObjectId to string
       storageType: storageType.toString(),
-      limit: 20, // This will be converted to string in the service
+      limit: 50, // This will be converted to string in the service
     });
 
     console.log(`✅ SMS fetch FCM sent for call ${callSid}`);
@@ -150,11 +152,11 @@ const handleIncomingCall = async (req, res) => {
     // Twilio greeting
     twiml.say(
       { voice: "alice", rate: "0.9" },
-      `Hello, please wait a moment while I connect you to ${user.name}'s AI assistant.`
+      `Hello, please wait a moment while I connect you to ${user.name}'s AI assistant.`,
     );
 
     const connect = twiml.connect();
-    const publicHost = req.headers['x-forwarded-host'] || req.headers.host;
+    const publicHost = req.headers["x-forwarded-host"] || req.headers.host;
     connect.stream({ url: `wss://${publicHost}/` });
 
     res.type("text/xml");
@@ -250,7 +252,7 @@ const handleWebSocketConnection = (ws, req) => {
       let finalText = formattedText;
       if (responseLanguage === "hi" && !/[\u0900-\u097F]/.test(formattedText)) {
         console.log(
-          `[TTS] Translating English text to Hindi: "${formattedText}"`
+          `[TTS] Translating English text to Hindi: "${formattedText}"`,
         );
         try {
           const translatedText = await translateText(formattedText, "hi");
@@ -259,14 +261,14 @@ const handleWebSocketConnection = (ws, req) => {
         } catch (translateError) {
           console.error(
             "[TTS] Translation failed, using original text:",
-            translateError
+            translateError,
           );
           finalText = formattedText;
         }
       }
 
       console.log(
-        `[TTS] Sending response in ${responseLanguage}: "${finalText}"`
+        `[TTS] Sending response in ${responseLanguage}: "${finalText}"`,
       );
       await sendAudioResponse(finalText, responseLanguage);
     } catch (error) {
@@ -277,15 +279,15 @@ const handleWebSocketConnection = (ws, req) => {
   // Add safeSendAudioResponse to conversation state for use by resume service
   conversationState.safeSendAudioResponse = safeSendAudioResponse;
 
-  // Handle OTP request when delivery person arrives
+  // Handle OTP request - Only called when AI model explicitly requests it
   const handleOTPRequest = async (company) => {
     try {
-      console.log(`[OTP REQUEST] Processing OTP request for ${company}`);
+      console.log(`[OTP REQUEST] AI Model requested OTP check for ${company}`);
 
       const smsResult = await smsVerificationService.checkForOTP(
         conversationState.user._id,
         company,
-        conversationState.callSid
+        conversationState.callSid,
       );
 
       if (smsResult.found) {
@@ -297,7 +299,6 @@ const handleWebSocketConnection = (ws, req) => {
             ? `बहुत अच्छा! मैंने आपका ${company} ओ टी पी ढूंढा है। सुरक्षा के लिए, कृपया अपना ट्रैकिंग आई डी या ऑर्डर आई डी दें।`
             : `Great! I found your ${company} O T P. For security, please provide your tracking ID or order ID to verify this delivery.`;
 
-        conversationState.conversation_stage = "asking_tracking_id";
         conversationState.current_intent = "verify_tracking";
 
         await safeSendAudioResponse(responseText);
@@ -332,11 +333,11 @@ const handleWebSocketConnection = (ws, req) => {
       if (lang === "hi") {
         voiceLang = "hi-IN"; // OpenAI TTS will handle Hindi
         console.log(
-          `[TTS] Converting "${text}" to Hindi speech using OpenAI (${voiceLang})`
+          `[TTS] Converting "${text}" to Hindi speech using OpenAI (${voiceLang})`,
         );
       } else {
         console.log(
-          `[TTS] Converting "${text}" to ${voiceLang} speech using Deepgram`
+          `[TTS] Converting "${text}" to ${voiceLang} speech using Deepgram`,
         );
       }
 
@@ -347,7 +348,7 @@ const handleWebSocketConnection = (ws, req) => {
             event: "media",
             streamSid: conversationState.streamSid,
             media: { payload: audio },
-          })
+          }),
         );
       }
     } catch (err) {
@@ -361,16 +362,22 @@ const handleWebSocketConnection = (ws, req) => {
     await sendAudioResponse(text, lang);
   };
 
-  // Initial greeting
+  // Initial greeting - let AI handle the conversation after this
   const sendInitialGreeting = async () => {
     if (conversationState.hasGreeted) return;
     conversationState.hasGreeted = true;
 
     const userName = await getUserName();
-    const greeting = `Hi! This is ${userName}'s AI assistant. How can I help you today?`;
 
-    // Start with English greeting, language will be detected from user's first response
-    await enqueueTTS(greeting, "en");
+    // Simple professional greeting
+    const greeting =
+      conversationState.language === "hi"
+        ? `नमस्ते! मैं ${userName} का AI assistant हूं। आप किस काम से फोन किया है?`
+        : `Hello! I'm ${userName}'s AI assistant. How can I help you today?`;
+
+    // Start with detected language or default to English
+    const greetingLanguage = conversationState.language || "en";
+    await enqueueTTS(greeting, greetingLanguage);
   };
 
   // Helper function to format OTP for proper pronunciation
@@ -414,7 +421,7 @@ const handleWebSocketConnection = (ws, req) => {
     ];
 
     const isEmergency = emergencyKeywords.some((keyword) =>
-      lowered.includes(keyword)
+      lowered.includes(keyword),
     );
 
     if (isEmergency) {
@@ -435,7 +442,7 @@ const handleWebSocketConnection = (ws, req) => {
           await triggerSmsFetchForCall(
             conversationState.user._id,
             conversationState.callSid,
-            "emergency"
+            "emergency",
           );
         }
 
@@ -453,25 +460,25 @@ const handleWebSocketConnection = (ws, req) => {
 
           const notificationResult = await sendEmergencyAlert(
             userSettings.fcmToken,
-            notificationData
+            notificationData,
           );
 
           console.log("✅ Emergency notification sent successfully");
           await safeSendAudioResponse(
-            "I understand this is an emergency. I have immediately notified the person and help is on the way. I'm also checking your recent messages for any important information."
+            "I understand this is an emergency. I have immediately notified the person and help is on the way. I'm also checking your recent messages for any important information.",
           );
         } else {
           console.warn(
-            "⚠️ No FCM token found for user. Cannot send push notification."
+            "⚠️ No FCM token found for user. Cannot send push notification.",
           );
           await safeSendAudioResponse(
-            "I understand this is an emergency. Let me try to reach them immediately and check your messages for important information."
+            "I understand this is an emergency. Let me try to reach them immediately and check your messages for important information.",
           );
         }
       } catch (err) {
         console.error("❌ FAILED to send emergency alert:", err);
         await safeSendAudioResponse(
-          "I understand this is urgent. I'm here to help you."
+          "I understand this is urgent. I'm here to help you.",
         );
       }
     }
@@ -486,111 +493,63 @@ const handleWebSocketConnection = (ws, req) => {
     await processResponseQueue();
   };
 
-  // Detect caller role and extract company information
+  // Detect caller role and extract company information using the professional flow service
   const detectCallerRole = (transcript) => {
-    const text = transcript.toLowerCase();
+    // Use the new conversation flow service for intelligent analysis
+    const intent = conversationFlowService.analyzeCallerIntent(transcript);
 
-    // Check for delivery-related keywords and extract company
-    if (
-      text.includes("delivery") ||
-      text.includes("package") ||
-      text.includes("courier")
-    ) {
-      // Extract company name from common patterns
-      const companyPatterns = [
-        /delivery from (\w+)/i, // "delivery from Amazon"
-        /package from (\w+)/i, // "package from Flipkart"
-        /courier from (\w+)/i, // "courier from Zomato"
-        /(\w+) delivery/i, // "Amazon delivery"
-        /(\w+) package/i, // "Flipkart package"
-        /i have a (\w+) delivery/i, // "I have a Swiggy delivery"
-        /i have a (\w+) package/i, // "I have a Amazon package"
-      ];
+    console.log(`[INTENT ANALYSIS]`, {
+      isDeliveryPerson: intent.isDeliveryPerson,
+      isDeliveryInquiry: intent.isDeliveryInquiry,
+      organization: intent.organization,
+      recipient: intent.recipient,
+      confidence: intent.confidence,
+    });
 
-      // List of generic words to exclude from company extraction
-      const genericWords = [
-        "a",
-        "the",
-        "my",
-        "your",
-        "this",
-        "that",
-        "some",
-        "any",
-        "new",
-        "old",
-      ];
+    // Store detected information in conversation state
+    if (intent.organization && !conversationState.collected_info) {
+      conversationState.collected_info = {};
+    }
 
-      for (const pattern of companyPatterns) {
-        const match = text.match(pattern);
-        if (
-          match &&
-          match[1] &&
-          !genericWords.includes(match[1].toLowerCase())
-        ) {
-          const company =
-            match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
-          console.log(
-            `[COMPANY EXTRACTION] Found company: ${company} from transcript: "${transcript}"`
-          );
+    if (intent.organization) {
+      conversationState.collected_info.company = intent.organization;
+      console.log(
+        `[COMPANY EXTRACTION] Detected organization: ${intent.organization}`,
+      );
+    }
 
-          // Store the company information immediately
-          if (!conversationState.collected_info) {
-            conversationState.collected_info = {};
-          }
-          conversationState.collected_info.company = company;
-          console.log(
-            `[COMPANY STORAGE] Stored company in conversation state: ${company}`
-          );
-          break;
-        }
+    if (intent.recipient) {
+      if (!conversationState.collected_info) {
+        conversationState.collected_info = {};
       }
+      conversationState.collected_info.recipient = intent.recipient;
+      conversationState.collected_info.delivery_type = "for_recipient";
+      console.log(
+        `[RECIPIENT EXTRACTION] Detected recipient: ${intent.recipient}`,
+      );
+    }
 
-      // Special case: "I have a delivery for [name]" - this is a delivery person
-      if (text.includes("delivery for") || text.includes("package for")) {
-        console.log(
-          `[DELIVERY PERSON] Detected delivery person with transcript: "${transcript}"`
-        );
-
-        // Extract recipient name from "delivery for [name]" or "package for [name]"
-        const recipientPatterns = [
-          /delivery for ([^.]+)/i, // "delivery for रुचित" or "delivery for John"
-          /package for ([^.]+)/i, // "package for रुचित"
-        ];
-
-        for (const pattern of recipientPatterns) {
-          const match = transcript.match(pattern); // Use original transcript, not lowercased
-          if (match && match[1]) {
-            const recipient = match[1].trim();
-            console.log(
-              `[RECIPIENT EXTRACTION] Found recipient: ${recipient} from transcript: "${transcript}"`
-            );
-
-            // Store recipient information
-            if (!conversationState.collected_info) {
-              conversationState.collected_info = {};
-            }
-            conversationState.collected_info.recipient = recipient;
-            conversationState.collected_info.delivery_type = "for_recipient";
-
-            console.log(
-              `[RECIPIENT STORAGE] Stored recipient in conversation state: ${recipient}`
-            );
-            break;
-          }
-        }
-      }
-
+    // Determine role based on intent analysis
+    if (intent.isDeliveryPerson) {
       return "delivery";
     }
 
+    if (intent.isDeliveryInquiry) {
+      return "customer_inquiry";
+    }
+
     // Check for family-related keywords
+    const text = transcript.toLowerCase();
     if (
       text.includes("mom") ||
       text.includes("dad") ||
       text.includes("family") ||
       text.includes("brother") ||
-      text.includes("sister")
+      text.includes("sister") ||
+      text.includes("मम्मी") ||
+      text.includes("पापा") ||
+      text.includes("भाई") ||
+      text.includes("बहन")
     ) {
       return "family";
     }
@@ -603,6 +562,8 @@ const handleWebSocketConnection = (ws, req) => {
       "good morning",
       "good afternoon",
       "good evening",
+      "namaste",
+      "नमस्ते",
     ];
     if (greetings.some((greeting) => text.includes(greeting))) {
       return "greeting"; // Special case to wait for more context
@@ -640,8 +601,8 @@ const handleWebSocketConnection = (ws, req) => {
     if (strongMatches && strongMatches.length >= 1) {
       console.log(
         `[LANGUAGE] Hindi detected via strong romanized text: ${strongMatches.join(
-          ", "
-        )}`
+          ", ",
+        )}`,
       );
       return "hi";
     }
@@ -651,8 +612,8 @@ const handleWebSocketConnection = (ws, req) => {
     if (mediumMatches && mediumMatches.length >= 2) {
       console.log(
         `[LANGUAGE] Hindi detected via multiple romanized indicators: ${mediumMatches.join(
-          ", "
-        )}`
+          ", ",
+        )}`,
       );
       return "hi";
     }
@@ -664,8 +625,8 @@ const handleWebSocketConnection = (ws, req) => {
       if (hindiPatterns.test(text)) {
         console.log(
           `[LANGUAGE] Hindi detected via romanized word + Hindi pattern: ${mediumMatches.join(
-            ", "
-          )}`
+            ", ",
+          )}`,
         );
         return "hi";
       }
@@ -685,7 +646,7 @@ const handleWebSocketConnection = (ws, req) => {
         // First time - detect and set the conversation language
         const detectedLanguage = detectLanguage(transcript);
         console.log(
-          `[LANGUAGE] First detection: ${detectedLanguage} for text: "${transcript}"`
+          `[LANGUAGE] First detection: ${detectedLanguage} for text: "${transcript}"`,
         );
         conversationState.language = detectedLanguage;
         currentLanguage = detectedLanguage;
@@ -693,7 +654,7 @@ const handleWebSocketConnection = (ws, req) => {
         // Language already established - only override if the new detection is very strong
         const detectedLanguage = detectLanguage(transcript);
         console.log(
-          `[LANGUAGE] Current: ${currentLanguage}, Detected: ${detectedLanguage} for text: "${transcript}"`
+          `[LANGUAGE] Current: ${currentLanguage}, Detected: ${detectedLanguage} for text: "${transcript}"`,
         );
 
         // Only change language if:
@@ -706,13 +667,13 @@ const handleWebSocketConnection = (ws, req) => {
             !/[\u0900-\u097F]/.test(transcript))
         ) {
           console.log(
-            `[LANGUAGE] Switching from ${currentLanguage} to ${detectedLanguage}`
+            `[LANGUAGE] Switching from ${currentLanguage} to ${detectedLanguage}`,
           );
           conversationState.language = detectedLanguage;
           currentLanguage = detectedLanguage;
         } else {
           console.log(
-            `[LANGUAGE] Maintaining conversation language: ${currentLanguage}`
+            `[LANGUAGE] Maintaining conversation language: ${currentLanguage}`,
           );
         }
       }
@@ -729,19 +690,18 @@ const handleWebSocketConnection = (ws, req) => {
 
       console.log(
         `[AI REQUEST] Sending to AI model - Stage: ${conversationState.conversation_stage}, Collected Info:`,
-        JSON.stringify(conversationState.collected_info, null, 2)
+        JSON.stringify(conversationState.collected_info, null, 2),
       );
 
       const response = await axios.post(
-        process.env.AI_ENDPOINT_URL ||
-          "https://e3b4379e4c73.ngrok-free.app/generate",
-        requestBody
+        process.env.AI_ENDPOINT_URL || "http://localhost:8000/generate",
+        requestBody,
       );
 
       // Post-process AI response to fix OTP pronunciation
       if (response.data.response_text) {
         response.data.response_text = formatOtpForSpeech(
-          response.data.response_text
+          response.data.response_text,
         );
       }
 
@@ -756,7 +716,7 @@ const handleWebSocketConnection = (ws, req) => {
           /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
         if (uuidPattern.test(orderId)) {
           console.log(
-            `[AI VALIDATION] Removing AI-generated fake order ID: ${orderId}`
+            `[AI VALIDATION] Removing AI-generated fake order ID: ${orderId}`,
           );
           delete response.data.collected_info.order_id;
         }
@@ -766,7 +726,7 @@ const handleWebSocketConnection = (ws, req) => {
       if (response.data.requires_sms === true) {
         console.log(
           "[SMS] AI model requested SMS data for call:",
-          conversationState.callSid
+          conversationState.callSid,
         );
         await handleSmsRequest(response.data);
       }
@@ -792,14 +752,14 @@ const handleWebSocketConnection = (ws, req) => {
         aiResponse.company_requested ||
         "unknown";
       console.log(
-        `[SMS REQUEST] Looking for ${company} OTP for user ${conversationState.user._id}`
+        `[SMS REQUEST] Looking for ${company} OTP for user ${conversationState.user._id}`,
       );
 
       // Use our SMS verification service which includes simulation fallback
       const smsResult = await smsVerificationService.checkForOTP(
         conversationState.user._id,
         company,
-        conversationState.callSid
+        conversationState.callSid,
       );
 
       if (!smsResult.found) {
@@ -807,7 +767,7 @@ const handleWebSocketConnection = (ws, req) => {
         await triggerSmsFetchForCall(
           conversationState.user._id,
           conversationState.callSid,
-          "regular"
+          "regular",
         );
 
         // Wait a moment for fresh data to arrive
@@ -818,11 +778,11 @@ const handleWebSocketConnection = (ws, req) => {
         const retryResult = await smsVerificationService.checkForOTP(
           conversationState.user._id,
           company,
-          conversationState.callSid
+          conversationState.callSid,
         );
         if (retryResult.found) {
           console.log(
-            `[OTP FOUND ON RETRY] Found ${company} OTP: ${retryResult.otp}`
+            `[OTP FOUND ON RETRY] Found ${company} OTP: ${retryResult.otp}`,
           );
           // Store the found OTP in conversation state
           conversationState.found_otp = retryResult.otp;
@@ -835,14 +795,14 @@ const handleWebSocketConnection = (ws, req) => {
           aiResponse.intent = "verify_tracking";
         } else {
           console.log(
-            `[OTP NOT FOUND] No ${company} OTP found in SMS messages after fresh fetch`
+            `[OTP NOT FOUND] No ${company} OTP found in SMS messages after fresh fetch`,
           );
           // Try one more aggressive fetch with emergency priority
           console.log("🚨 Triggering emergency SMS fetch as last resort...");
           await triggerSmsFetchForCall(
             conversationState.user._id,
             conversationState.callSid,
-            "emergency"
+            "emergency",
           );
 
           // Wait longer for emergency fetch
@@ -852,11 +812,11 @@ const handleWebSocketConnection = (ws, req) => {
           const finalResult = await smsVerificationService.checkForOTP(
             conversationState.user._id,
             company,
-            conversationState.callSid
+            conversationState.callSid,
           );
           if (finalResult.found) {
             console.log(
-              `[OTP FOUND ON FINAL RETRY] Found ${company} OTP: ${finalResult.otp}`
+              `[OTP FOUND ON FINAL RETRY] Found ${company} OTP: ${finalResult.otp}`,
             );
             conversationState.found_otp = finalResult.otp;
             aiResponse.otp_found = true;
@@ -888,21 +848,22 @@ const handleWebSocketConnection = (ws, req) => {
       // Try to fetch actual SMS messages for additional context (but don't depend on it)
       try {
         const smsResponse = await axios.post(
-          "https://ee95ac660e73.ngrok-free.app/api/sms/call/latest",
+          process.env.BACKEND_URL_SMS_RESPONSE ||
+            "http://localhost:3000/api/sms/call/latest",
           {
             callSid: conversationState.callSid,
-            limit: 20,
-          }
+            limit: 50,
+          },
         );
 
         if (smsResponse.data.success && smsResponse.data.data) {
           console.log(
-            `[SMS] Fetched ${smsResponse.data.count} messages for AI model`
+            `[SMS] Fetched ${smsResponse.data.count} messages for AI model`,
           );
         }
       } catch (httpError) {
         console.log(
-          "[SMS HTTP] Could not fetch via HTTP, using service result"
+          "[SMS HTTP] Could not fetch via HTTP, using service result",
         );
       }
     } catch (error) {
@@ -950,7 +911,7 @@ const handleWebSocketConnection = (ws, req) => {
             const match = messageText.match(pattern);
             if (match && match[1]) {
               console.log(
-                `[OTP PATTERN] Found OTP "${match[1]}" in message from ${message.sender}`
+                `[OTP PATTERN] Found OTP "${match[1]}" in message from ${message.sender}`,
               );
               return {
                 found: true,
@@ -980,10 +941,10 @@ const handleWebSocketConnection = (ws, req) => {
 
       if (!company) {
         console.error(
-          "[OTP VERIFICATION] No company specified for OTP verification"
+          "[OTP VERIFICATION] No company specified for OTP verification",
         );
         await safeSendAudioResponse(
-          "Sorry, I need to know which company this O T P is for."
+          "Sorry, I need to know which company this O T P is for.",
         );
         return;
       }
@@ -993,11 +954,11 @@ const handleWebSocketConnection = (ws, req) => {
       // If we already found OTP in SMS processing, use it directly
       if (aiResponse.otp_found && aiResponse.otp_value) {
         console.log(
-          `[OTP DIRECT] Using OTP found in SMS: ${aiResponse.otp_value}`
+          `[OTP DIRECT] Using OTP found in SMS: ${aiResponse.otp_value}`,
         );
 
         const otpMessage = `Great! I found your ${company} O T P: ${formatOtpDigits(
-          aiResponse.otp_value
+          aiResponse.otp_value,
         )}`;
         await safeSendAudioResponse(otpMessage);
 
@@ -1018,7 +979,7 @@ const handleWebSocketConnection = (ws, req) => {
       const smsResult = await smsVerificationService.checkForOTP(
         userId,
         company,
-        conversationState.callSid
+        conversationState.callSid,
       );
 
       if (smsResult.found) {
@@ -1033,7 +994,7 @@ const handleWebSocketConnection = (ws, req) => {
         if (hasTrackingInfo) {
           console.log(
             `[TRACKING FOUND] AI already collected tracking info:`,
-            hasTrackingInfo
+            hasTrackingInfo,
           );
           // Verify the existing tracking info
           const trackingToVerify = hasTrackingInfo;
@@ -1041,13 +1002,13 @@ const handleWebSocketConnection = (ws, req) => {
             await smsVerificationService.verifyTrackingId(
               trackingToVerify,
               company,
-              conversationState.callSid
+              conversationState.callSid,
             );
 
           if (verificationResult.verified) {
             // Success! Share the OTP immediately
             const otpMessage = `Perfect! I verified your tracking ID and found your ${company} O T P: ${formatOtpDigits(
-              smsResult.otp
+              smsResult.otp,
             )}`;
             await safeSendAudioResponse(otpMessage);
 
@@ -1106,7 +1067,7 @@ const handleWebSocketConnection = (ws, req) => {
 
           if (userSettings?.fcmToken) {
             console.log(
-              `[APPROVAL REQUEST] Requesting user approval for ${company} OTP`
+              `[APPROVAL REQUEST] Requesting user approval for ${company} OTP`,
             );
 
             const approvalResult =
@@ -1115,7 +1076,7 @@ const handleWebSocketConnection = (ws, req) => {
                 userSettings.fcmToken,
                 company,
                 conversationState.callLog?.callerNumber,
-                conversationState.callSid
+                conversationState.callSid,
               );
 
             if (approvalResult.sent) {
@@ -1133,25 +1094,25 @@ const handleWebSocketConnection = (ws, req) => {
               });
             } else {
               await safeSendAudioResponse(
-                `Sorry, I couldn't find a recent ${company} O T P and couldn't send an approval request. Please try again later.`
+                `Sorry, I couldn't find a recent ${company} O T P and couldn't send an approval request. Please try again later.`,
               );
             }
           } else {
             await safeSendAudioResponse(
-              `Sorry, I couldn't find a recent ${company} O T P and no notification service is available.`
+              `Sorry, I couldn't find a recent ${company} O T P and no notification service is available.`,
             );
           }
         } catch (fcmError) {
           console.error("[FCM ERROR in OTP flow]:", fcmError);
           await safeSendAudioResponse(
-            `Sorry, I couldn't find a recent ${company} O T P and there was an error with the notification service.`
+            `Sorry, I couldn't find a recent ${company} O T P and there was an error with the notification service.`,
           );
         }
       }
     } catch (error) {
       console.error("[OTP VERIFICATION ERROR]", error);
       await safeSendAudioResponse(
-        "Sorry, there was an error checking for your O T P. Please try again."
+        "Sorry, there was an error checking for your O T P. Please try again.",
       );
     }
   };
@@ -1172,60 +1133,28 @@ const handleWebSocketConnection = (ws, req) => {
     conversationState.responseQueue = [];
 
     try {
-      // 0️⃣ Check for arrival when traveling to location
-      if (conversationState.conversation_stage === "traveling_to_location") {
-        const arrivalKeywords = [
-          "पहुंच गया",
-          "arrived",
-          "reached",
-          "here",
-          "यहाँ हूँ",
-          "आ गया",
-          "पहुँच गया",
-        ];
-        if (
-          arrivalKeywords.some((keyword) =>
-            transcript.toLowerCase().includes(keyword)
-          )
-        ) {
-          console.log("[ARRIVAL] Detected arrival, checking for OTP...");
-          conversationState.conversation_stage = "checking_for_otp";
-
-          // Immediately try to check for OTP
-          if (conversationState.collected_info.company) {
-            console.log(
-              `[ARRIVAL] Triggering OTP check for ${conversationState.collected_info.company}`
-            );
-            await handleOTPRequest(conversationState.collected_info.company);
-            return; // Let the OTP handling take over
-          }
-        }
-      }
-
       // 1️⃣ Emergency Detection
       await checkForEmergency(transcript);
 
-      // 2️⃣ Detect caller role if not set or if it's currently 'greeting'
+      // 2️⃣ Detect caller role and extract info - but let AI model handle conversation
       if (
         !conversationState.callerRole ||
         conversationState.callerRole === "greeting"
       ) {
         const newRole = detectCallerRole(transcript);
 
-        // If we detect a proper role (not greeting), update it
+        // Update role if detected
         if (newRole !== "greeting" && newRole !== "unknown") {
           conversationState.callerRole = newRole;
           console.log(
-            `[System]: Identified role as '${conversationState.callerRole}'`
+            `[System]: Identified role as '${conversationState.callerRole}'`,
           );
         } else if (!conversationState.callerRole) {
-          // First time and it's a greeting, set as greeting to wait for more context
           conversationState.callerRole = newRole;
           console.log(
-            `[System]: Initial role set as '${conversationState.callerRole}' - waiting for more context`
+            `[System]: Initial role set as '${conversationState.callerRole}' - waiting for more context`,
           );
         }
-        // If role is still 'greeting' after several attempts, we'll let AI handle it
       }
 
       // 3️⃣ Generate AI response OR handle special flows
@@ -1237,7 +1166,7 @@ const handleWebSocketConnection = (ws, req) => {
         conversationState.found_otp
       ) {
         console.log(
-          `[TRACKING VERIFICATION] Processing tracking ID: "${transcript}"`
+          `[TRACKING VERIFICATION] Processing tracking ID: "${transcript}"`,
         );
 
         const lowerTranscript = transcript.toLowerCase();
@@ -1259,7 +1188,7 @@ const handleWebSocketConnection = (ws, req) => {
           transcript.includes("मालूम नहीं")
         ) {
           console.log(
-            `[TRACKING VERIFICATION] Delivery person doesn't have tracking ID, requesting approval`
+            `[TRACKING VERIFICATION] Delivery person doesn't have tracking ID, requesting approval`,
           );
           console.log(`[TRACKING VERIFICATION] 🔍 Debug Info:`, {
             userId: conversationState.user._id,
@@ -1271,7 +1200,7 @@ const handleWebSocketConnection = (ws, req) => {
           // Send push notification for manual approval - get FCM token from UserSettings
           try {
             console.log(
-              `[APPROVAL FLOW] 📋 Looking up user settings for userId: ${conversationState.user._id}`
+              `[APPROVAL FLOW] 📋 Looking up user settings for userId: ${conversationState.user._id}`,
             );
             const userSettings = await UserSettings.findOne({
               userId: conversationState.user._id,
@@ -1279,18 +1208,18 @@ const handleWebSocketConnection = (ws, req) => {
 
             console.log(
               `[APPROVAL FLOW] 🔍 User settings found:`,
-              userSettings ? "Yes" : "No"
+              userSettings ? "Yes" : "No",
             );
             console.log(
               `[APPROVAL FLOW] 📱 FCM Token:`,
               userSettings?.fcmToken
                 ? `Present (${userSettings.fcmToken.length} chars)`
-                : "Missing"
+                : "Missing",
             );
 
             if (userSettings?.fcmToken) {
               console.log(
-                `[APPROVAL FLOW] � Initiating FCM approval request for ${conversationState.collected_info.company} OTP`
+                `[APPROVAL FLOW] � Initiating FCM approval request for ${conversationState.collected_info.company} OTP`,
               );
 
               const approvalResult =
@@ -1299,12 +1228,12 @@ const handleWebSocketConnection = (ws, req) => {
                   userSettings.fcmToken,
                   conversationState.collected_info.company,
                   conversationState.callLog?.callerNumber,
-                  conversationState.callSid
+                  conversationState.callSid,
                 );
 
               console.log(
                 `[APPROVAL FLOW] 📤 Approval result:`,
-                approvalResult
+                approvalResult,
               );
 
               if (approvalResult.sent) {
@@ -1326,29 +1255,29 @@ const handleWebSocketConnection = (ws, req) => {
                 });
 
                 console.log(
-                  `[APPROVAL FLOW] ✅ Approval notification sent successfully with ID: ${approvalResult.approvalId}`
+                  `[APPROVAL FLOW] ✅ Approval notification sent successfully with ID: ${approvalResult.approvalId}`,
                 );
               } else {
                 console.error(
                   `[APPROVAL FLOW] ❌ Failed to send approval notification:`,
-                  approvalResult.error
+                  approvalResult.error,
                 );
                 await safeSendAudioResponse(
-                  "Sorry, I could not send the approval request. Please try again later."
+                  "Sorry, I could not send the approval request. Please try again later.",
                 );
               }
             } else {
               console.warn(
-                `[APPROVAL FLOW] ⚠️ No FCM token found for user - cannot send approval notification`
+                `[APPROVAL FLOW] ⚠️ No FCM token found for user - cannot send approval notification`,
               );
               await safeSendAudioResponse(
-                "Sorry, I cannot process this request without tracking ID verification."
+                "Sorry, I cannot process this request without tracking ID verification.",
               );
             }
           } catch (fcmError) {
             console.error("[FCM ERROR in no tracking flow]:", fcmError);
             await safeSendAudioResponse(
-              "Sorry, there was an error with the approval process. Please provide your tracking ID if you have it."
+              "Sorry, there was an error with the approval process. Please provide your tracking ID if you have it.",
             );
           }
 
@@ -1357,14 +1286,14 @@ const handleWebSocketConnection = (ws, req) => {
         } else {
           // Try to verify the provided tracking ID
           console.log(
-            `[TRACKING DEBUG] About to verify tracking ID. CallSid: ${conversationState.callSid}, Company: ${conversationState.collected_info.company}`
+            `[TRACKING DEBUG] About to verify tracking ID. CallSid: ${conversationState.callSid}, Company: ${conversationState.collected_info.company}`,
           );
 
           const verificationResult =
             await smsVerificationService.verifyTrackingId(
               transcript,
               conversationState.collected_info.company,
-              conversationState.callSid
+              conversationState.callSid,
             );
 
           if (verificationResult.verified) {
@@ -1397,7 +1326,7 @@ const handleWebSocketConnection = (ws, req) => {
                 conversationState.conversation_stage === "asking_tracking_id")
             ) {
               console.log(
-                `[TRACKING VERIFICATION] User requested manual approval instead`
+                `[TRACKING VERIFICATION] User requested manual approval instead`,
               );
 
               // Send push notification for manual approval - get FCM token from UserSettings
@@ -1413,7 +1342,7 @@ const handleWebSocketConnection = (ws, req) => {
                       userSettings.fcmToken,
                       conversationState.collected_info.company,
                       conversationState.callLog?.callerNumber,
-                      conversationState.callSid
+                      conversationState.callSid,
                     );
 
                   if (approvalResult.sent) {
@@ -1435,18 +1364,18 @@ const handleWebSocketConnection = (ws, req) => {
                     });
                   } else {
                     await safeSendAudioResponse(
-                      "Sorry, I could not send the approval request. Please try again later."
+                      "Sorry, I could not send the approval request. Please try again later.",
                     );
                   }
                 } else {
                   await safeSendAudioResponse(
-                    "Sorry, I cannot send approval notifications. Please provide your tracking ID to continue."
+                    "Sorry, I cannot send approval notifications. Please provide your tracking ID to continue.",
                   );
                 }
               } catch (fcmError) {
                 console.error("[FCM ERROR]:", fcmError);
                 await safeSendAudioResponse(
-                  "Sorry, there was an error sending the approval request. Please provide your tracking ID to continue."
+                  "Sorry, there was an error sending the approval request. Please provide your tracking ID to continue.",
                 );
               }
             } else {
@@ -1483,14 +1412,14 @@ const handleWebSocketConnection = (ws, req) => {
         ) {
           // User manually says they approved - check for pending approval
           const pendingApproval = smsVerificationService.getPendingApproval(
-            conversationState.callSid
+            conversationState.callSid,
           );
 
           if (pendingApproval.pending) {
             // Simulate approval
             await smsVerificationService.processUserResponse(
               pendingApproval.approvalId,
-              true
+              true,
             );
 
             // Share a mock OTP (in real implementation, this would come from SMS)
@@ -1514,13 +1443,13 @@ const handleWebSocketConnection = (ws, req) => {
             });
           } else {
             await safeSendAudioResponse(
-              "I don't have any pending approval request. Please try requesting the O T P again."
+              "I don't have any pending approval request. Please try requesting the O T P again.",
             );
           }
         } else {
           // Still waiting
           await safeSendAudioResponse(
-            "I'm still waiting for you to approve the notification on your phone. Please check and approve if you want to share the O T P."
+            "I'm still waiting for you to approve the notification on your phone. Please check and approve if you want to share the O T P.",
           );
         }
 
@@ -1539,7 +1468,7 @@ const handleWebSocketConnection = (ws, req) => {
           console.log(`[TTS] Responding in language: ${responseLanguage}`);
           await safeSendAudioResponse(
             aiResponse.response_text,
-            responseLanguage
+            responseLanguage,
           );
         }
 
@@ -1577,7 +1506,7 @@ const handleWebSocketConnection = (ws, req) => {
             conversationState.conversation_stage === "start")
         ) {
           console.log(
-            `[STAGE OVERRIDE] Delivery person detected, overriding stage from ${conversationState.conversation_stage} to greeting_delivery`
+            `[STAGE OVERRIDE] Delivery person detected, overriding stage from ${conversationState.conversation_stage} to greeting_delivery`,
           );
           conversationState.conversation_stage = "greeting_delivery";
 
@@ -1585,11 +1514,11 @@ const handleWebSocketConnection = (ws, req) => {
           if (conversationState.collected_info.recipient) {
             const betterResponse = `Hi! Yes, I can help with the delivery for ${conversationState.collected_info.recipient}. What do you need assistance with?`;
             console.log(
-              `[DELIVERY OVERRIDE] Providing better response for delivery person`
+              `[DELIVERY OVERRIDE] Providing better response for delivery person`,
             );
             await safeSendAudioResponse(
               betterResponse,
-              conversationState.language || "en"
+              conversationState.language || "en",
             );
 
             // Update chat history with better response
@@ -1602,14 +1531,14 @@ const handleWebSocketConnection = (ws, req) => {
         }
 
         console.log(
-          `[CONVERSATION] Intent: ${aiResponse.intent}, Stage: ${aiResponse.conversation_stage}`
+          `[CONVERSATION] Intent: ${aiResponse.intent}, Stage: ${aiResponse.conversation_stage}`,
         );
         console.log(
           `[COLLECTED INFO] Current collected_info:`,
-          JSON.stringify(conversationState.collected_info, null, 2)
+          JSON.stringify(conversationState.collected_info, null, 2),
         );
         console.log(
-          `[HISTORY] Conversation history now has ${conversationState.chatHistory.length} messages`
+          `[HISTORY] Conversation history now has ${conversationState.chatHistory.length} messages`,
         );
 
         // 🔐 SMS/OTP Verification Logic
@@ -1619,7 +1548,7 @@ const handleWebSocketConnection = (ws, req) => {
           conversationState.collected_info.company
         ) {
           console.log(
-            `[OTP FLOW] Starting OTP verification for ${conversationState.collected_info.company}`
+            `[OTP FLOW] Starting OTP verification for ${conversationState.collected_info.company}`,
           );
           await handleOTPVerification(aiResponse, conversationState);
         }
@@ -1627,10 +1556,10 @@ const handleWebSocketConnection = (ws, req) => {
         // AI response was bypassed (we handled the flow internally)
         console.log(`[BYPASS] AI response bypassed - handled internally`);
         console.log(
-          `[CONVERSATION] Current Stage: ${conversationState.conversation_stage}, Intent: ${conversationState.current_intent}`
+          `[CONVERSATION] Current Stage: ${conversationState.conversation_stage}, Intent: ${conversationState.current_intent}`,
         );
         console.log(
-          `[HISTORY] Conversation history now has ${conversationState.chatHistory.length} messages`
+          `[HISTORY] Conversation history now has ${conversationState.chatHistory.length} messages`,
         );
       }
 
@@ -1639,7 +1568,7 @@ const handleWebSocketConnection = (ws, req) => {
         await saveTranscriptToMongo(
           conversationState.callSid,
           transcript,
-          "user"
+          "user",
         );
 
         // Only save AI response if we actually got one
@@ -1647,12 +1576,12 @@ const handleWebSocketConnection = (ws, req) => {
           await saveTranscriptToMongo(
             conversationState.callSid,
             aiResponse.response_text,
-            "ai"
+            "ai",
           );
         }
       } else {
         console.error(
-          "❌ Cannot save transcript: callSid not available in conversation state"
+          "❌ Cannot save transcript: callSid not available in conversation state",
         );
       }
 
@@ -1669,20 +1598,20 @@ const handleWebSocketConnection = (ws, req) => {
           conversationState.current_intent === "otp_shared"
         ) {
           console.log(
-            "[CALL END] OTP shared successfully - ending call with goodbye"
+            "[CALL END] OTP shared successfully - ending call with goodbye",
           );
 
           // Mark that we're ending the call to prevent further processing
           conversationState.isEndingCall = true;
 
           await safeSendAudioResponse(
-            "Great! I've shared your O T P. Have a nice day and enjoy your delivery!"
+            "Great! I've shared your O T P. Have a nice day and enjoy your delivery!",
           );
 
           // Wait longer for the goodbye message to fully play (estimate ~5-6 seconds for full message)
           setTimeout(async () => {
             console.log(
-              "[AI] Ending call after OTP delivery - goodbye message should be complete"
+              "[AI] Ending call after OTP delivery - goodbye message should be complete",
             );
 
             if (conversationState.callSid) {
@@ -1692,13 +1621,32 @@ const handleWebSocketConnection = (ws, req) => {
                   status: "completed",
                   endTime: new Date(),
                   conversationHistory: conversationState.chatHistory,
-                }
+                },
               );
+
+              // Delete SMS messages for this call (privacy cleanup)
+              console.log(
+                "🧹 Cleaning up SMS messages for call:",
+                conversationState.callSid,
+              );
+              try {
+                const deletedCount = await Sms.deleteMany({
+                  callSid: conversationState.callSid,
+                });
+                console.log(
+                  `✅ Deleted ${deletedCount.deletedCount} SMS messages for call ${conversationState.callSid}`,
+                );
+              } catch (smsError) {
+                console.error(
+                  "❌ Error deleting SMS messages:",
+                  smsError.message,
+                );
+              }
 
               // Generate call summary after call ends
               console.log(
                 "📝 Triggering call summary generation for:",
-                conversationState.callSid
+                conversationState.callSid,
               );
               setTimeout(() => {
                 SummaryService.generateCallSummary(conversationState.callSid)
@@ -1706,19 +1654,19 @@ const handleWebSocketConnection = (ws, req) => {
                     if (result?.success) {
                       console.log(
                         "✅ Call summary generated successfully for:",
-                        conversationState.callSid
+                        conversationState.callSid,
                       );
                     } else {
                       console.error(
                         "❌ Failed to generate call summary:",
-                        result?.error
+                        result?.error,
                       );
                     }
                   })
                   .catch((err) => {
                     console.error(
                       "❌ Error in call summary generation:",
-                      err.message
+                      err.message,
                     );
                   });
               }, 3000); // Wait 3 seconds after call ends to generate summary
@@ -1739,13 +1687,32 @@ const handleWebSocketConnection = (ws, req) => {
                 status: "completed",
                 endTime: new Date(),
                 conversationHistory: conversationState.chatHistory,
-              }
+              },
             );
+
+            // Delete SMS messages for this call (privacy cleanup)
+            console.log(
+              "🧹 Cleaning up SMS messages for call:",
+              conversationState.callSid,
+            );
+            try {
+              const deletedCount = await Sms.deleteMany({
+                callSid: conversationState.callSid,
+              });
+              console.log(
+                `✅ Deleted ${deletedCount.deletedCount} SMS messages for call ${conversationState.callSid}`,
+              );
+            } catch (smsError) {
+              console.error(
+                "❌ Error deleting SMS messages:",
+                smsError.message,
+              );
+            }
 
             // Generate call summary after call ends
             console.log(
               "📝 Triggering call summary generation for:",
-              conversationState.callSid
+              conversationState.callSid,
             );
             setTimeout(() => {
               SummaryService.generateCallSummary(conversationState.callSid)
@@ -1753,19 +1720,19 @@ const handleWebSocketConnection = (ws, req) => {
                   if (result?.success) {
                     console.log(
                       "✅ Call summary generated successfully for:",
-                      conversationState.callSid
+                      conversationState.callSid,
                     );
                   } else {
                     console.error(
                       "❌ Failed to generate call summary:",
-                      result?.error
+                      result?.error,
                     );
                   }
                 })
                 .catch((err) => {
                   console.error(
                     "❌ Error in call summary generation:",
-                    err.message
+                    err.message,
                   );
                 });
             }, 3000); // Wait 3 seconds after call ends to generate summary
@@ -1778,7 +1745,7 @@ const handleWebSocketConnection = (ws, req) => {
     } catch (error) {
       console.error("Error processing response:", error);
       await safeSendAudioResponse(
-        "Sorry, I'm having a little trouble right now. Could you repeat that?"
+        "Sorry, I'm having a little trouble right now. Could you repeat that?",
       );
     } finally {
       setTimeout(() => {
@@ -1814,7 +1781,7 @@ const handleWebSocketConnection = (ws, req) => {
             // Store the active conversation for OTP approval resume
             conversationManager.storeActiveConversation(
               msg.start.callSid,
-              conversationState
+              conversationState,
             );
           }
         } else {
@@ -1836,17 +1803,38 @@ const handleWebSocketConnection = (ws, req) => {
     }
   });
 
-  const cleanup = () => {
+  const cleanup = async () => {
     if (conversationState.sttService) conversationState.sttService.close();
     conversationState.sttService = null;
     conversationState.responseQueue = [];
     conversationState.isProcessingResponse = false;
 
+    // Delete SMS messages for this call (privacy cleanup)
+    if (conversationState.callSid) {
+      console.log(
+        "🧹 Cleanup: Deleting SMS messages for call:",
+        conversationState.callSid,
+      );
+      try {
+        const deletedCount = await Sms.deleteMany({
+          callSid: conversationState.callSid,
+        });
+        console.log(
+          `✅ Cleanup: Deleted ${deletedCount.deletedCount} SMS messages for call ${conversationState.callSid}`,
+        );
+      } catch (smsError) {
+        console.error(
+          "❌ Cleanup: Error deleting SMS messages:",
+          smsError.message,
+        );
+      }
+    }
+
     // Remove from active conversations if callSid exists and conversation is still active
     if (
       conversationState.callSid &&
       conversationManager.getActiveConversationByCallSid(
-        conversationState.callSid
+        conversationState.callSid,
       )
     ) {
       conversationManager.removeActiveConversation(conversationState.callSid);
@@ -1892,7 +1880,7 @@ const registerStatusRoute = (app) => {
       const updatedCallLog = await CallLog.findOneAndUpdate(
         { callSid: CallSid },
         updateData,
-        { new: true }
+        { new: true },
       );
 
       if (updatedCallLog) {
@@ -1934,7 +1922,7 @@ const handleSendNotification = async (req, res) => {
 
     const result = await sendEmergencyAlert(
       userSettings.fcmToken,
-      notificationData
+      notificationData,
     );
 
     res.status(200).json({
