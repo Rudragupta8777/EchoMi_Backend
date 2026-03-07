@@ -686,6 +686,7 @@ const handleWebSocketConnection = (ws, req) => {
         collected_info: conversationState.collected_info || {}, // Pass existing collected info
         call_sid: conversationState.callSid, // Include call SID for SMS requests
         response_language: currentLanguage, // Tell the AI model to respond in this language
+        delivery_location: conversationState.user?.deliveryLocation || null, // Include user's delivery location
         // Add Hindi language hints for better understanding
         language_hints:
           currentLanguage === "hi"
