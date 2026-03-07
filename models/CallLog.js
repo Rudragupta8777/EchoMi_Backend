@@ -1,5 +1,12 @@
 const mongoose = require("mongoose");
 
+// Get current time in Indian Standard Time (IST, UTC+5:30)
+const getISTTime = () => {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000; // 5.5 hours in milliseconds
+  return new Date(now.getTime() + istOffset);
+};
+
 const CallLogSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -51,7 +58,7 @@ const CallLogSchema = new mongoose.Schema({
       },
       timestamp: {
         type: Date,
-        default: Date.now,
+        default: getISTTime,
       },
     },
   ],

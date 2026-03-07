@@ -18,6 +18,14 @@ const SummaryService = require("../services/summaryService");
 const url = require("url");
 const { translateText } = require("../services/translationService");
 
+// Get current time in Indian Standard Time (IST, UTC+5:30)
+const getISTTime = () => {
+  const now = new Date();
+  // Convert to IST by adding 5 hours and 30 minutes to UTC
+  const istOffset = 5.5 * 60 * 60 * 1000; // 5.5 hours in milliseconds
+  return new Date(now.getTime() + istOffset);
+};
+
 // Phone number formatting function
 const formatPhoneNumber = (twilioPhoneNumber) => {
   if (!twilioPhoneNumber) return "Unknown";
@@ -68,7 +76,7 @@ const saveTranscriptToMongo = async (callSid, newMessage, role) => {
           transcript: {
             speaker: role === "user" ? "caller" : "ai",
             text: newMessage,
-            timestamp: new Date(),
+            timestamp: getISTTime(),
           },
         },
       },
@@ -141,7 +149,7 @@ const handleIncomingCall = async (req, res) => {
       userId: user._id,
       callerNumber: formattedCallerNumber,
       callSid,
-      startTime: new Date(),
+      startTime: getISTTime(),
     });
     await callLog.save();
     console.log("CallLog created:", callLog);
@@ -455,7 +463,7 @@ const handleWebSocketConnection = (ws, req) => {
             priority: "high",
             callSid: conversationState.callSid,
             callerNumber: conversationState.callLog.callerNumber,
-            timestamp: new Date().toISOString(),
+            timestamp: getISTTime().toISOString(),
           };
 
           const notificationResult = await sendEmergencyAlert(
@@ -1936,7 +1944,7 @@ const handleSendNotification = async (req, res) => {
       title: "Message from AI Assistant",
       body: message,
       priority: priority,
-      timestamp: new Date().toISOString(),
+      timestamp: getISTTime().toISOString(),
     };
 
     const result = await sendEmergencyAlert(

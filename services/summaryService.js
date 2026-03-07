@@ -1,6 +1,13 @@
 const axios = require("axios");
 const CallLog = require("../models/CallLog");
 
+// Get current time in Indian Standard Time (IST, UTC+5:30)
+const getISTTime = () => {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000; // 5.5 hours in milliseconds
+  return new Date(now.getTime() + istOffset);
+};
+
 class SummaryService {
   // Generate call summary using AI
   static async generateCallSummary(callSid) {
@@ -19,7 +26,7 @@ class SummaryService {
 
       if (!callLog.transcript || callLog.transcript.length === 0) {
         console.warn(
-          "⚠️ No transcript found for call, skipping summary generation"
+          "⚠️ No transcript found for call, skipping summary generation",
         );
         console.log("📋 CallLog structure:", JSON.stringify(callLog, null, 2));
         return null;
@@ -30,7 +37,7 @@ class SummaryService {
 
       // Format transcript for AI processing
       const transcriptText = this.formatTranscriptForSummary(
-        callLog.transcript
+        callLog.transcript,
       );
 
       // Prepare data for AI model in the format it expects
@@ -55,18 +62,17 @@ Please respond with ONLY the summary, not a conversational response.`,
       console.log("🤖 Sending transcript to AI for summary generation...");
       console.log(
         "📋 Summary request payload:",
-        JSON.stringify(summaryRequest, null, 2)
+        JSON.stringify(summaryRequest, null, 2),
       );
       console.log("📝 Transcript text length:", transcriptText.length);
       console.log(
         "📝 First 200 chars of transcript:",
-        transcriptText.substring(0, 200)
+        transcriptText.substring(0, 200),
       );
 
       // Call AI model for summary (using your existing AI endpoint)
       const AI_MODEL_URL =
-        process.env.AI_MODEL_URL ||
-        "http://localhost:8000/generate";
+        process.env.AI_MODEL_URL || "http://localhost:8000/generate";
       const response = await axios.post(AI_MODEL_URL, summaryRequest, {
         timeout: 30000, // 30 second timeout
         headers: {
@@ -76,7 +82,7 @@ Please respond with ONLY the summary, not a conversational response.`,
 
       console.log(
         "🤖 AI Model Response:",
-        JSON.stringify(response.data, null, 2)
+        JSON.stringify(response.data, null, 2),
       );
 
       const summary = response.data?.summary || response.data?.response_text;
@@ -88,7 +94,7 @@ Please respond with ONLY the summary, not a conversational response.`,
 
       if (!summary || isConversationalResponse) {
         console.error(
-          "❌ AI model returned conversational response instead of summary, generating basic summary"
+          "❌ AI model returned conversational response instead of summary, generating basic summary",
         );
         const basicSummary = this.generateBasicSummary(callLog, transcriptText);
         if (basicSummary) {
@@ -97,9 +103,9 @@ Please respond with ONLY the summary, not a conversational response.`,
             { callSid },
             {
               summary: basicSummary,
-              summaryGeneratedAt: new Date(),
+              summaryGeneratedAt: getISTTime(),
             },
-            { new: true }
+            { new: true },
           );
 
           return {
@@ -118,9 +124,9 @@ Please respond with ONLY the summary, not a conversational response.`,
         { callSid },
         {
           summary: summary,
-          summaryGeneratedAt: new Date(),
+          summaryGeneratedAt: getISTTime(),
         },
-        { new: true }
+        { new: true },
       );
 
       console.log("✅ Summary generated and saved for callSid:", callSid);
@@ -141,13 +147,13 @@ Please respond with ONLY the summary, not a conversational response.`,
           { callSid },
           {
             summaryError: error.message,
-            summaryAttemptedAt: new Date(),
-          }
+            summaryAttemptedAt: getISTTime(),
+          },
         );
       } catch (updateError) {
         console.error(
           "❌ Error updating call log with summary error:",
-          updateError
+          updateError,
         );
       }
 
@@ -179,7 +185,7 @@ Please respond with ONLY the summary, not a conversational response.`,
 
     // If the response contains typical conversational endings, it's likely not a summary
     const hasConversationalPhrases = conversationalPhrases.some((phrase) =>
-      lowerText.includes(phrase)
+      lowerText.includes(phrase),
     );
 
     // If the response is very short (less than 20 words), it's likely conversational
@@ -198,7 +204,7 @@ Please respond with ONLY the summary, not a conversational response.`,
       "caller",
     ];
     const hasSummaryWords = summaryWords.some((word) =>
-      lowerText.includes(word)
+      lowerText.includes(word),
     );
 
     return hasConversationalPhrases || (isTooShort && !hasSummaryWords);
@@ -208,7 +214,7 @@ Please respond with ONLY the summary, not a conversational response.`,
   static generateBasicSummary(callLog, transcriptText) {
     try {
       const callerMessages = callLog.transcript.filter(
-        (t) => t.speaker === "caller"
+        (t) => t.speaker === "caller",
       );
       const aiMessages = callLog.transcript.filter((t) => t.speaker === "ai");
 
@@ -230,7 +236,7 @@ Please respond with ONLY the summary, not a conversational response.`,
       // Extract what was provided/discussed
       const assistance = this.extractAssistanceProvided(
         aiMessages,
-        callerMessages
+        callerMessages,
       );
 
       // Extract outcome
@@ -418,7 +424,7 @@ Please respond with ONLY the summary, not a conversational response.`,
     try {
       const callLog = await CallLog.findOne({ callSid })
         .select(
-          "summary summaryGeneratedAt summaryError transcript callerNumber startTime duration"
+          "summary summaryGeneratedAt summaryError transcript callerNumber startTime duration",
         )
         .populate("userId", "name")
         .lean();
@@ -463,7 +469,7 @@ Please respond with ONLY the summary, not a conversational response.`,
         .lean();
 
       console.log(
-        `📊 Found ${callsWithoutSummary.length} calls needing summaries`
+        `📊 Found ${callsWithoutSummary.length} calls needing summaries`,
       );
 
       const results = [];
@@ -479,7 +485,7 @@ Please respond with ONLY the summary, not a conversational response.`,
 
       const successful = results.filter((r) => r?.success).length;
       console.log(
-        `✅ Generated summaries for ${successful}/${results.length} calls`
+        `✅ Generated summaries for ${successful}/${results.length} calls`,
       );
 
       return {
