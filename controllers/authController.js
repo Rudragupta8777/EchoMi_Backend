@@ -122,13 +122,19 @@ const getDeliveryLocation = async (req, res) => {
   const userId = req.user._id;
 
   try {
-    const user = await User.findById(userId).select('deliveryLocation name email');
+    const user = await User.findById(userId).select(
+      "deliveryLocation name email",
+    );
 
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    if (!user.deliveryLocation || !user.deliveryLocation.latitude || !user.deliveryLocation.longitude) {
+    if (
+      !user.deliveryLocation ||
+      !user.deliveryLocation.latitude ||
+      !user.deliveryLocation.longitude
+    ) {
       return res.status(200).json({
         message: "No delivery location set",
         deliveryLocation: null,
@@ -178,11 +184,10 @@ const updateDeliveryLocation = async (req, res) => {
       updateData.deliveryLocation.address = address;
     }
 
-    const user = await User.findByIdAndUpdate(
-      userId,
-      updateData,
-      { new: true, runValidators: true },
-    );
+    const user = await User.findByIdAndUpdate(userId, updateData, {
+      new: true,
+      runValidators: true,
+    });
 
     if (!user) {
       return res.status(404).json({ message: "User not found" });
@@ -198,9 +203,9 @@ const updateDeliveryLocation = async (req, res) => {
   }
 };
 
-module.exports = { 
-  registerOrLoginUser, 
-  setDeliveryLocation, 
+module.exports = {
+  registerOrLoginUser,
+  setDeliveryLocation,
   getDeliveryLocation,
-  updateDeliveryLocation 
+  updateDeliveryLocation,
 };
