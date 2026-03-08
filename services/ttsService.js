@@ -2,44 +2,42 @@ const axios = require("axios");
 const { translateText } = require("./translationService"); // translation service
 
 /**
- * TTS Service - Hybrid Text-to-Speech
+ * TTS Service - Sarvam AI Text-to-Speech
  *
- * Uses:
- * - Deepgram for English (fast, low latency)
- * - OpenAI for Hindi (better quality and pronunciation)
+ * Uses Sarvam AI for both English and Hindi with native Indian voices
  *
- * Hindi Voice Options (OpenAI):
- * - 'shimmer' (current) - Softer, warm female voice - best for Hindi clarity
- * - 'fable' - Neutral, clear pronunciation - alternative option
- * - 'nova' - Warm female voice - previous default
- * - 'alloy' - Neutral voice
- * - 'echo' - Male voice
- * - 'onyx' - Deep male voice
+ * Voice Options (Available Speakers):
+ * Female: anushka, manisha, vidya, arya, ritu, priya, neha, pooja, simran, kavya,
+ *         ishita, shreya, roopa, tanya, shruti, suhani, kavitha, rupali, amelia, sophia
+ * Male: abhilash, karun, hitesh, aditya, rahul, rohan, amit, dev, ratan, varun,
+ *       manan, sumit, kabir, aayan, shubh, ashutosh, advait, anand, tarun, sunny,
+ *       mani, gokul, vijay, mohit, rehan, soham
  *
- * To change voice: Update this.openaiConfig.voice in constructor below
+ * Model: bulbul:v3 (latest stable version)
+ *
+ * To change voice: Update this.sarvamConfig.speakers in constructor below
  */
 
 class TtsService {
   constructor() {
     this.isSpeaking = false;
     this.speechQueue = [];
-    // Hybrid TTS configuration
-    this.deepgramConfig = {
-      models: {
-        en: "aura-asteria-en",
-        es: "aura-asteria-es",
-        fr: "aura-asteria-fr",
-        default: "aura-asteria-en",
+    // Sarvam AI TTS configuration
+    this.sarvamConfig = {
+      apiEndpoint: "https://api.sarvam.ai/text-to-speech",
+      model: "bulbul:v3",
+      speakers: {
+        hi: "shreya", // Female voice for Hindi - Clear and professional
+        en: "shreya", // Using same voice for English
+        // Other female options: "vidya", "neha", "ishita", "priya", "manisha", "kavya"
+        // Male options: "amit", "rohan", "dev", "rahul", "mohit", "varun", "shubh"
       },
-      encoding: "mulaw",
-      sample_rate: 8000,
+      pace: 1.05, // Slightly faster for sharper, crisper delivery
+      speech_sample_rate: 8000, // 8kHz for Twilio compatibility
+      enable_preprocessing: true, // Enhanced clarity and noise reduction
+      // Note: pitch and loudness are NOT supported in bulbul:v3
     };
-    this.openaiConfig = {
-      model: "tts-1",
-      voice: "nova", // Warm female voice - good for Hindi
-      response_format: "pcm",
-    };
-    // Pre-compute µ-law lookup table for OpenAI conversion
+    // Pre-compute µ-law lookup table for audio conversion
     this.mulawTable = this.buildMulawTable();
   }
 
@@ -87,7 +85,25 @@ class TtsService {
   }
 
   /**
+   * Convert PCM16 audio to µ-law format for Twilio (without downsampling)
+   * Used for Sarvam AI audio which is already at 8kHz
+   */
+  convertPcmToMulawSimple(pcm16Buffer) {
+    const outputSize = Math.floor(pcm16Buffer.length / 2); // 2 bytes per sample
+    const mulawBuffer = Buffer.alloc(outputSize);
+
+    // Convert each 16-bit PCM sample to µ-law
+    for (let i = 0, j = 0; i < pcm16Buffer.length - 1; i += 2, j++) {
+      const sample = pcm16Buffer.readInt16LE(i) + 32768; // Convert to unsigned
+      mulawBuffer[j] = this.mulawTable[sample & 0xffff];
+    }
+
+    return mulawBuffer;
+  }
+
+  /**
    * Convert OpenAI PCM16 audio to µ-law format for Twilio
+   * Used for OpenAI audio which needs downsampling from 24kHz to 8kHz
    */
   convertPcmToMulaw(pcm16Buffer) {
     const outputSize = Math.floor(pcm16Buffer.length / 6); // Downsample 24kHz->8kHz
@@ -103,7 +119,7 @@ class TtsService {
   }
 
   /**
-   * Main TTS function - Hybrid approach: Deepgram for English, OpenAI for Hindi
+   * Main TTS function - Uses Sarvam AI for both English and Hindi
    * @param {string} text - Text to speak
    * @param {string} lang - Target language (e.g., "en", "hi")
    */
@@ -117,12 +133,8 @@ class TtsService {
       console.log(`[TTS] Converting text to speech: "${text}" in [${lang}]`);
       const startTime = Date.now();
 
-      // Route to appropriate TTS service based on language
-      if (lang === "hi" || lang === "hi-IN") {
-        return await this.generateOpenAITTS(text, startTime);
-      } else {
-        return await this.generateDeepgramTTS(text, lang, startTime);
-      }
+      // Use Sarvam AI for both English and Hindi
+      return await this.generateSarvamTTS(text, lang, startTime);
     } catch (error) {
       console.error(
         "[TTS] Error generating speech:",
@@ -133,78 +145,70 @@ class TtsService {
   }
 
   /**
-   * Generate TTS using Deepgram (for English and other languages)
+   * Generate TTS using Sarvam AI (for both English and Hindi)
    */
-  async generateDeepgramTTS(text, lang, startTime) {
-    console.log(`[TTS] Using Deepgram for language: ${lang}`);
+  async generateSarvamTTS(text, lang, startTime) {
+    console.log(`[TTS] Using Sarvam AI for language: ${lang}`);
 
-    const model =
-      this.deepgramConfig.models[lang] || this.deepgramConfig.models["default"];
-
-    const response = await axios.post(
-      "https://api.deepgram.com/v1/speak",
-      { text: text },
-      {
-        headers: {
-          Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        params: {
-          model: model,
-          encoding: this.deepgramConfig.encoding,
-          sample_rate: this.deepgramConfig.sample_rate,
-        },
-        responseType: "arraybuffer",
-        timeout: 5000,
-      },
-    );
-
-    const audioBase64 = Buffer.from(response.data).toString("base64");
-    const totalTime = Date.now() - startTime;
-    console.log(
-      `[TTS] Deepgram TTS completed in ${totalTime}ms - Size: ${audioBase64.length} chars`,
-    );
-
-    return audioBase64;
-  }
-
-  /**
-   * Generate TTS using OpenAI (for Hindi)
-   */
-  async generateOpenAITTS(text, startTime) {
-    console.log(`[TTS] Using OpenAI for Hindi text`);
+    // Map language codes to Sarvam AI format
+    const languageCode = lang === "hi" || lang === "hi-IN" ? "hi-IN" : "en-IN";
+    const baseLang = lang === "hi" || lang === "hi-IN" ? "hi" : "en";
+    const speaker = this.sarvamConfig.speakers[baseLang];
 
     const apiStart = Date.now();
     const response = await axios.post(
-      "https://api.openai.com/v1/audio/speech",
+      this.sarvamConfig.apiEndpoint,
       {
-        model: this.openaiConfig.model,
-        input: text,
-        voice: this.openaiConfig.voice,
-        response_format: this.openaiConfig.response_format,
-        speed: 1.0,
+        inputs: [text],
+        target_language_code: languageCode,
+        speaker: speaker,
+        pace: this.sarvamConfig.pace,
+        speech_sample_rate: this.sarvamConfig.speech_sample_rate,
+        enable_preprocessing: this.sarvamConfig.enable_preprocessing,
+        model: this.sarvamConfig.model,
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "api-subscription-key": process.env.SARVAM_API_KEY,
           "Content-Type": "application/json",
         },
-        responseType: "arraybuffer",
-        timeout: 15000, // OpenAI takes longer
+        responseType: "json",
+        timeout: 15000,
       },
     );
-    console.log(`[TTS] OpenAI API took: ${Date.now() - apiStart}ms`);
+    console.log(`[TTS] Sarvam AI API took: ${Date.now() - apiStart}ms`);
 
-    // Convert OpenAI PCM to µ-law for Twilio
+    // Sarvam AI returns base64 encoded PCM audio - convert to µ-law for Twilio
     const processStart = Date.now();
-    const pcm16Buffer = Buffer.from(response.data);
-    const mulawBuffer = this.convertPcmToMulaw(pcm16Buffer);
-    const audioBase64 = mulawBuffer.toString("base64");
-    console.log(`[TTS] Audio processing took: ${Date.now() - processStart}ms`);
+    let audioBase64;
+
+    if (
+      response.data &&
+      response.data.audios &&
+      response.data.audios.length > 0
+    ) {
+      const sarvamAudioBase64 = response.data.audios[0];
+
+      // Decode base64 to PCM buffer
+      const pcmBuffer = Buffer.from(sarvamAudioBase64, "base64");
+
+      // Convert PCM to µ-law for Twilio compatibility
+      const mulawBuffer = this.convertPcmToMulawSimple(pcmBuffer);
+      audioBase64 = mulawBuffer.toString("base64");
+
+      console.log(
+        `[TTS] Audio processing took: ${Date.now() - processStart}ms`,
+      );
+      console.log(
+        `[TTS] PCM: ${pcmBuffer.length} bytes → µ-law: ${mulawBuffer.length} bytes`,
+      );
+    } else {
+      throw new Error("No audio data received from Sarvam AI");
+    }
 
     const totalTime = Date.now() - startTime;
     console.log(
-      `[TTS] OpenAI TTS completed in ${totalTime}ms - PCM: ${pcm16Buffer.length} bytes, µ-law: ${mulawBuffer.length} bytes`,
+      `[TTS] Sarvam AI TTS completed in ${totalTime}ms - Size: ${audioBase64.length} chars`,
     );
 
     return audioBase64;

@@ -118,4 +118,89 @@ const setDeliveryLocation = async (req, res) => {
   }
 };
 
-module.exports = { registerOrLoginUser, setDeliveryLocation };
+const getDeliveryLocation = async (req, res) => {
+  const userId = req.user._id;
+
+  try {
+    const user = await User.findById(userId).select('deliveryLocation name email');
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (!user.deliveryLocation || !user.deliveryLocation.latitude || !user.deliveryLocation.longitude) {
+      return res.status(200).json({
+        message: "No delivery location set",
+        deliveryLocation: null,
+      });
+    }
+
+    res.status(200).json({
+      deliveryLocation: user.deliveryLocation,
+      user: {
+        name: user.name,
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server Error" });
+  }
+};
+
+const updateDeliveryLocation = async (req, res) => {
+  const { latitude, longitude, address } = req.body;
+  const userId = req.user._id;
+
+  if (!latitude || !longitude) {
+    return res
+      .status(400)
+      .json({ message: "Please provide latitude and longitude" });
+  }
+
+  // Validate latitude and longitude ranges
+  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+    return res
+      .status(400)
+      .json({ message: "Invalid latitude or longitude values" });
+  }
+
+  try {
+    const updateData = {
+      deliveryLocation: {
+        latitude: parseFloat(latitude),
+        longitude: parseFloat(longitude),
+      },
+    };
+
+    // Add address if provided
+    if (address) {
+      updateData.deliveryLocation.address = address;
+    }
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      updateData,
+      { new: true, runValidators: true },
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.status(200).json({
+      message: "Delivery location updated successfully",
+      deliveryLocation: user.deliveryLocation,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server Error" });
+  }
+};
+
+module.exports = { 
+  registerOrLoginUser, 
+  setDeliveryLocation, 
+  getDeliveryLocation,
+  updateDeliveryLocation 
+};
