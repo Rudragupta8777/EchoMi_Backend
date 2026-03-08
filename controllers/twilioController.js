@@ -582,66 +582,60 @@ const handleWebSocketConnection = (ws, req) => {
 
   // Detect language from transcript
   const detectLanguage = (text) => {
-    // Enhanced Hindi detection patterns
-    const hindiPattern = /[\u0900-\u097F]/; // Devanagari script
-    const hindiWords =
-      /\b(है|हैं|मेरे|मेरा|पास|का|के|की|में|से|को|ने|और|यह|वह|आप|हम|तुम|हो|होगा|करना|करे|जी|हाँ|नहीं|क्या|कैसे|कहाँ|कब|डिलीवरी|पैकेज)\b/;
+    // Count words in the text to determine if it's a full sentence
+    const words = text.trim().split(/\s+/);
+    const wordCount = words.length;
 
-    // More specific romanized Hindi patterns (avoid common English words)
-    const strongRomanHindi =
-      /\b(haan|nahi|kya|kaise|kahan|aapko|hamara|tumhara|karo|karna|chahiye)\b/i;
-    const mediumRomanHindi = /\b(hai|mere|mera|aap|hum|tum)\b/i;
+    // Devanagari script detection - STRONGEST indicator (add 'g' flag to match all)
+    const hindiPattern = /[\u0900-\u097F]/g;
+    const devanagariMatches = (text.match(hindiPattern) || []).length;
 
-    // Check for Devanagari script (strongest indicator)
-    if (hindiPattern.test(text)) {
-      console.log(`[LANGUAGE] Hindi detected via Devanagari script`);
-      return "hi";
-    }
-
-    // Check for common Hindi words in Devanagari
-    if (hindiWords.test(text)) {
-      console.log(`[LANGUAGE] Hindi detected via Hindi words`);
-      return "hi";
-    }
-
-    // Check for strong romanized Hindi indicators
-    const strongMatches = text.match(strongRomanHindi);
-    if (strongMatches && strongMatches.length >= 1) {
+    // If ANY Devanagari characters found, it's Hindi - this is the most reliable indicator
+    if (devanagariMatches > 0) {
       console.log(
-        `[LANGUAGE] Hindi detected via strong romanized text: ${strongMatches.join(
-          ", ",
-        )}`,
+        `[LANGUAGE] Hindi detected via Devanagari script (${devanagariMatches} characters found)`,
       );
       return "hi";
     }
 
-    // Check for medium romanized Hindi indicators (need multiple)
-    const mediumMatches = text.match(mediumRomanHindi);
-    if (mediumMatches && mediumMatches.length >= 2) {
+    // For romanized Hindi, we need MULTIPLE strong indicators in a full sentence
+    // Only consider Hindi if the text has at least 5 words (full sentence)
+    if (wordCount < 5) {
       console.log(
-        `[LANGUAGE] Hindi detected via multiple romanized indicators: ${mediumMatches.join(
-          ", ",
-        )}`,
+        `[LANGUAGE] English detected - text too short (${wordCount} words), treating as English`,
+      );
+      return "en";
+    }
+
+    // Strong Hindi sentence patterns - require multiple matches
+    const strongHindiPatterns =
+      /\b(haan|nahi|kya|kaise|kahan|kab|kyu|kyun|aapko|aapse|hamara|tumhara|mujhe|mere paas|mere liye|aap ka|aap ki|chahiye|karke|karna|hoga|hoega|thik hai|bilkul|zaroor)\b/gi;
+    const strongMatches = text.match(strongHindiPatterns) || [];
+
+    // Medium Hindi indicators
+    const mediumHindiPatterns =
+      /\b(hai|hain|tha|the|ho|hoon|mera|mere|tera|tere|uska|uske|yeh|woh|kuch|sab|bahut|kitna|kitne|jaldi|abhi|phir|fir)\b/gi;
+    const mediumMatches = text.match(mediumHindiPatterns) || [];
+
+    // Calculate Hindi content percentage
+    const totalHindiMatches = strongMatches.length + mediumMatches.length * 0.5;
+    const hindiPercentage = (totalHindiMatches / wordCount) * 100;
+
+    // Only detect as Hindi if:
+    // 1. At least 2 strong Hindi indicators, OR
+    // 2. Hindi content is more than 40% of the sentence
+    if (strongMatches.length >= 2 || hindiPercentage >= 40) {
+      console.log(
+        `[LANGUAGE] Hindi detected - Strong matches: ${strongMatches.length}, Hindi content: ${hindiPercentage.toFixed(1)}% of ${wordCount} words`,
       );
       return "hi";
     }
 
-    // Check for combination: at least one medium + contains typical Hindi sentence structure
-    if (mediumMatches && mediumMatches.length >= 1) {
-      // Look for typical Hindi sentence patterns
-      const hindiPatterns = /\b(paas|wala|wali|ke liye|ki tarah|se)\b/i;
-      if (hindiPatterns.test(text)) {
-        console.log(
-          `[LANGUAGE] Hindi detected via romanized word + Hindi pattern: ${mediumMatches.join(
-            ", ",
-          )}`,
-        );
-        return "hi";
-      }
-    }
-
-    console.log(`[LANGUAGE] English detected (default)`);
-    return "en"; // Default to English
+    // Default to English for everything else
+    console.log(
+      `[LANGUAGE] English detected - Insufficient Hindi content (${strongMatches.length} strong, ${hindiPercentage.toFixed(1)}% Hindi in ${wordCount} words)`,
+    );
+    return "en";
   };
 
   // Generate AI response
@@ -659,27 +653,59 @@ const handleWebSocketConnection = (ws, req) => {
         conversationState.language = detectedLanguage;
         currentLanguage = detectedLanguage;
       } else {
-        // Language already established - only override if the new detection is very strong
+        // Language already established - stay with it unless there's overwhelming evidence to switch
         const detectedLanguage = detectLanguage(transcript);
         console.log(
           `[LANGUAGE] Current: ${currentLanguage}, Detected: ${detectedLanguage} for text: "${transcript}"`,
         );
 
-        // Only change language if:
-        // 1. Current is English and we detect strong Hindi indicators
-        // 2. Current is Hindi and we detect clear English-only text
-        if (
-          (currentLanguage === "en" && detectedLanguage === "hi") ||
-          (currentLanguage === "hi" &&
-            detectedLanguage === "en" &&
-            !/[\u0900-\u097F]/.test(transcript))
-        ) {
-          console.log(
-            `[LANGUAGE] Switching from ${currentLanguage} to ${detectedLanguage}`,
-          );
-          conversationState.language = detectedLanguage;
-          currentLanguage = detectedLanguage;
+        // Only change language if detection consistently shows a different language
+        // This prevents switching on individual words or names
+        if (currentLanguage !== detectedLanguage) {
+          // Initialize switch counter if not exists
+          if (!conversationState.languageSwitchCounter) {
+            conversationState.languageSwitchCounter = 0;
+          }
+
+          // Track last detected language
+          if (
+            conversationState.lastDetectedDifferentLanguage !== detectedLanguage
+          ) {
+            conversationState.lastDetectedDifferentLanguage = detectedLanguage;
+            conversationState.languageSwitchCounter = 1;
+            console.log(
+              `[LANGUAGE] Different language detected (${detectedLanguage}), counter: 1`,
+            );
+          } else {
+            conversationState.languageSwitchCounter++;
+            console.log(
+              `[LANGUAGE] Same different language detected (${detectedLanguage}), counter: ${conversationState.languageSwitchCounter}`,
+            );
+          }
+
+          // Only switch if we've detected the different language 2+ times in a row
+          if (conversationState.languageSwitchCounter >= 2) {
+            console.log(
+              `[LANGUAGE] Switching from ${currentLanguage} to ${detectedLanguage} after ${conversationState.languageSwitchCounter} consistent detections`,
+            );
+            conversationState.language = detectedLanguage;
+            currentLanguage = detectedLanguage;
+            conversationState.languageSwitchCounter = 0;
+            conversationState.lastDetectedDifferentLanguage = null;
+          } else {
+            console.log(
+              `[LANGUAGE] Not switching yet - need ${2 - conversationState.languageSwitchCounter} more consistent detection(s)`,
+            );
+          }
         } else {
+          // Same language detected, reset counter
+          if (conversationState.languageSwitchCounter > 0) {
+            console.log(
+              `[LANGUAGE] Resetting switch counter - language matches current`,
+            );
+            conversationState.languageSwitchCounter = 0;
+            conversationState.lastDetectedDifferentLanguage = null;
+          }
           console.log(
             `[LANGUAGE] Maintaining conversation language: ${currentLanguage}`,
           );
