@@ -598,42 +598,48 @@ const handleWebSocketConnection = (ws, req) => {
       return "hi";
     }
 
-    // For romanized Hindi, we need MULTIPLE strong indicators in a full sentence
-    // Only consider Hindi if the text has at least 5 words (full sentence)
-    if (wordCount < 5) {
-      console.log(
-        `[LANGUAGE] English detected - text too short (${wordCount} words), treating as English`,
-      );
-      return "en";
-    }
-
-    // Strong Hindi sentence patterns - require multiple matches
+    // For romanized Hindi, analyze based on percentage of Hindi words
+    // Works with ANY sentence length - no minimum requirement
+    
+    // Strong Hindi sentence patterns (removed common English words like "delivery")
     const strongHindiPatterns =
-      /\b(haan|nahi|kya|kaise|kahan|kab|kyu|kyun|aapko|aapse|hamara|tumhara|mujhe|mere paas|mere liye|aap ka|aap ki|chahiye|karke|karna|hoga|hoega|thik hai|bilkul|zaroor)\b/gi;
+      /\b(haan|nahi|kya|kaise|kahan|kab|kyu|kyun|aapko|aapse|hamara|tumhara|mujhe|mere paas|mere liye|aap ka|aap ki|chahiye|karke|karna|hoga|hoega|thik hai|bilkul|zaroor|pahunch|gaya|leke|aaya|boy|main)\b/gi;
     const strongMatches = text.match(strongHindiPatterns) || [];
 
     // Medium Hindi indicators
     const mediumHindiPatterns =
-      /\b(hai|hain|tha|the|ho|hoon|mera|mere|tera|tere|uska|uske|yeh|woh|kuch|sab|bahut|kitna|kitne|jaldi|abhi|phir|fir)\b/gi;
+      /\b(hai|hain|tha|the|ho|hoon|mera|mere|tera|tere|uska|uske|yeh|woh|kuch|sab|bahut|kitna|kitne|jaldi|abhi|phir|fir|se|ka|ki|ke)\b/gi;
     const mediumMatches = text.match(mediumHindiPatterns) || [];
+
+    // Check for English sentence structure indicators
+    const englishPatterns = /\b(have|has|had|is|are|was|were|will|would|can|could|should|do|does|did|the|this|that|these|those|my|your|his|her|its|our|their|i|you|he|she|it|we|they)\b/gi;
+    const englishMatches = text.match(englishPatterns) || [];
 
     // Calculate Hindi content percentage
     const totalHindiMatches = strongMatches.length + mediumMatches.length * 0.5;
     const hindiPercentage = (totalHindiMatches / wordCount) * 100;
+    const englishPercentage = (englishMatches.length / wordCount) * 100;
 
-    // Only detect as Hindi if:
-    // 1. At least 2 strong Hindi indicators, OR
-    // 2. Hindi content is more than 40% of the sentence
-    if (strongMatches.length >= 2 || hindiPercentage >= 40) {
+    // Detect as Hindi if:
+    // 1. For any length: Hindi content is more than 40% AND English content is less than 30%
+    // 2. Strong Hindi presence: At least 2 strong Hindi words
+    if (hindiPercentage >= 40 && englishPercentage < 30) {
       console.log(
         `[LANGUAGE] Hindi detected - Strong matches: ${strongMatches.length}, Hindi content: ${hindiPercentage.toFixed(1)}% of ${wordCount} words`,
+      );
+      return "hi";
+    }
+    
+    if (strongMatches.length >= 2) {
+      console.log(
+        `[LANGUAGE] Hindi detected - Multiple strong Hindi indicators (${strongMatches.length})`,
       );
       return "hi";
     }
 
     // Default to English for everything else
     console.log(
-      `[LANGUAGE] English detected - Insufficient Hindi content (${strongMatches.length} strong, ${hindiPercentage.toFixed(1)}% Hindi in ${wordCount} words)`,
+      `[LANGUAGE] English detected - Hindi: ${hindiPercentage.toFixed(1)}%, English: ${englishPercentage.toFixed(1)}% in ${wordCount} words`,
     );
     return "en";
   };
@@ -721,6 +727,10 @@ const handleWebSocketConnection = (ws, req) => {
         call_sid: conversationState.callSid, // Include call SID for SMS requests
         response_language: currentLanguage, // Tell the AI model to respond in this language
         delivery_location: conversationState.user?.deliveryLocation || null, // Include user's delivery location
+        // CRITICAL: Enforce strict language requirement
+        language_instruction: currentLanguage === "hi" 
+          ? "IMPORTANT: You MUST respond ONLY in Hindi (Devanagari script). Do NOT use any English words in your response. The user is speaking Hindi, so respond completely in Hindi."
+          : "Respond in English only.",
         // Add Hindi language hints for better understanding
         language_hints:
           currentLanguage === "hi"
@@ -736,7 +746,7 @@ const handleWebSocketConnection = (ws, req) => {
                   "पहुँच गया",
                 ],
                 context:
-                  "Hindi conversation - recognize arrival statements and progress conversation stage accordingly",
+                  "Hindi conversation - recognize arrival statements and progress conversation stage accordingly. Respond ONLY in Hindi.",
               }
             : undefined,
       };
@@ -747,7 +757,7 @@ const handleWebSocketConnection = (ws, req) => {
       );
 
       const response = await axios.post(
-        process.env.AI_ENDPOINT_URL || "http://localhost:8000/generate",
+        process.env.AI_MODEL_URL || "http://localhost:8000/generate",
         requestBody,
       );
 
@@ -1638,13 +1648,17 @@ const handleWebSocketConnection = (ws, req) => {
         );
       }
 
-      // 7️⃣ Hang up logic if end_of_call OR after OTP is shared
+      // 7️⃣ Hang up logic if end_of_call, call_ending, end_call flag, OR after OTP is shared
       if (
-        (aiResponse && aiResponse.stage === "end_of_call") ||
+        (aiResponse && (aiResponse.stage === "end_of_call" || aiResponse.stage === "call_ending" || aiResponse.end_call === true)) ||
         conversationState.conversation_stage === "end_of_call" ||
+        conversationState.conversation_stage === "call_ending" ||
         (conversationState.conversation_stage === "otp_provided" &&
           conversationState.current_intent === "otp_shared")
       ) {
+        // Mark that we're ending the call to prevent further processing
+        conversationState.isEndingCall = true;
+        
         // If we just shared an OTP, say goodbye first
         if (
           conversationState.conversation_stage === "otp_provided" &&
@@ -1653,9 +1667,6 @@ const handleWebSocketConnection = (ws, req) => {
           console.log(
             "[CALL END] OTP shared successfully - ending call with goodbye",
           );
-
-          // Mark that we're ending the call to prevent further processing
-          conversationState.isEndingCall = true;
 
           await safeSendAudioResponse(
             "Great! I've shared your O T P. Have a nice day and enjoy your delivery!",
@@ -1730,8 +1741,82 @@ const handleWebSocketConnection = (ws, req) => {
           }, 6000); // Wait 6 seconds for goodbye message to play completely
 
           return; // Exit early to prevent further processing
+        } else if (
+          conversationState.conversation_stage === "call_ending" ||
+          (aiResponse && (aiResponse.stage === "call_ending" || aiResponse.end_call === true))
+        ) {
+          // AI said goodbye and wants to end call - wait for message to complete
+          console.log("[CALL END] AI ending call with goodbye message - waiting for completion");
+          
+          // Wait for the goodbye message to play completely before hanging up
+          setTimeout(async () => {
+            console.log("[CALL END] Goodbye message complete - hanging up call now");
+            
+            if (conversationState.callSid) {
+              await CallLog.findOneAndUpdate(
+                { callSid: conversationState.callSid },
+                {
+                  status: "completed",
+                  endTime: new Date(),
+                  conversationHistory: conversationState.chatHistory,
+                },
+              );
+
+              // Delete SMS messages for this call (privacy cleanup)
+              console.log(
+                "🧹 Cleaning up SMS messages for call:",
+                conversationState.callSid,
+              );
+              try {
+                const deletedCount = await Sms.deleteMany({
+                  callSid: conversationState.callSid,
+                });
+                console.log(
+                  `✅ Deleted ${deletedCount.deletedCount} SMS messages for call ${conversationState.callSid}`,
+                );
+              } catch (smsError) {
+                console.error(
+                  "❌ Error deleting SMS messages:",
+                  smsError.message,
+                );
+              }
+
+              // Generate call summary after call ends
+              console.log(
+                "📝 Triggering call summary generation for:",
+                conversationState.callSid,
+              );
+              setTimeout(() => {
+                SummaryService.generateCallSummary(conversationState.callSid)
+                  .then((result) => {
+                    if (result?.success) {
+                      console.log(
+                        "✅ Call summary generated successfully for:",
+                        conversationState.callSid,
+                      );
+                    } else {
+                      console.error(
+                        "❌ Failed to generate call summary:",
+                        result?.error,
+                      );
+                    }
+                  })
+                  .catch((err) => {
+                    console.error(
+                      "❌ Error in call summary generation:",
+                      err.message,
+                    );
+                  });
+              }, 3000); // Wait 3 seconds after call ends to generate summary
+            }
+
+            ws.send(JSON.stringify({ action: "hangup" }));
+            setTimeout(() => ws.close(), 1000);
+          }, 8000); // Wait 8 seconds for goodbye message to play (longer message needs more time)
+
+          return; // Exit early to prevent further processing
         } else {
-          console.log("[AI] Stage reached: end_of_call → Hanging up call.");
+          console.log("[AI] Stage reached: end_of_call → Hanging up call immediately.");
 
           if (conversationState.callSid) {
             await CallLog.findOneAndUpdate(

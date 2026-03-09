@@ -32,7 +32,7 @@ class TtsService {
         // Other female options: "vidya", "neha", "ishita", "priya", "manisha", "kavya"
         // Male options: "amit", "rohan", "dev", "rahul", "mohit", "varun", "shubh"
       },
-      pace: 1.05, // Slightly faster for sharper, crisper delivery
+      pace: 0.90, // Slower pace for clearer delivery and better comprehension
       speech_sample_rate: 8000, // 8kHz for Twilio compatibility
       enable_preprocessing: true, // Enhanced clarity and noise reduction
       // Note: pitch and loudness are NOT supported in bulbul:v3
@@ -91,11 +91,14 @@ class TtsService {
   convertPcmToMulawSimple(pcm16Buffer) {
     const outputSize = Math.floor(pcm16Buffer.length / 2); // 2 bytes per sample
     const mulawBuffer = Buffer.alloc(outputSize);
+    const volumeGain = 0.1; // Reduce volume by 40% to prevent loud output
 
-    // Convert each 16-bit PCM sample to µ-law
+    // Convert each 16-bit PCM sample to µ-law with volume reduction
     for (let i = 0, j = 0; i < pcm16Buffer.length - 1; i += 2, j++) {
-      const sample = pcm16Buffer.readInt16LE(i) + 32768; // Convert to unsigned
-      mulawBuffer[j] = this.mulawTable[sample & 0xffff];
+      const originalSample = pcm16Buffer.readInt16LE(i);
+      // Apply volume gain and convert to unsigned
+      const reducedSample = Math.round(originalSample * volumeGain) + 32768;
+      mulawBuffer[j] = this.mulawTable[reducedSample & 0xffff];
     }
 
     return mulawBuffer;
@@ -108,11 +111,14 @@ class TtsService {
   convertPcmToMulaw(pcm16Buffer) {
     const outputSize = Math.floor(pcm16Buffer.length / 6); // Downsample 24kHz->8kHz
     const mulawBuffer = Buffer.alloc(outputSize);
+    const volumeGain = 0.6; // Reduce volume by 40% to prevent loud output
 
-    // Downsample and convert in single pass
+    // Downsample and convert in single pass with volume reduction
     for (let i = 0, j = 0; j < outputSize; i += 6, j++) {
-      const sample = pcm16Buffer.readInt16LE(i) + 32768; // Convert to unsigned
-      mulawBuffer[j] = this.mulawTable[sample & 0xffff];
+      const originalSample = pcm16Buffer.readInt16LE(i);
+      // Apply volume gain and convert to unsigned
+      const reducedSample = Math.round(originalSample * volumeGain) + 32768;
+      mulawBuffer[j] = this.mulawTable[reducedSample & 0xffff];
     }
 
     return mulawBuffer;

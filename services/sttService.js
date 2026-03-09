@@ -23,8 +23,9 @@ class SttService extends EventEmitter {
       model: "nova-3",
       smart_format: true,
       encoding: "mulaw",
-      language: "en-IN", // English in Indian accent - keeps names in English
-      detect_language: false, // Disable auto language detection
+      language: "hi", // Hindi model - also handles English and code-mixing well
+      // Deepgram's Hindi model can transcribe both Hindi (romanized) and English
+      // Our backend language detection will analyze the text and respond accordingly
       sample_rate: 8000,
       interim_results: true, // Keep this for responsiveness
       endpointing: 300, // Wait 300ms after speech ends
