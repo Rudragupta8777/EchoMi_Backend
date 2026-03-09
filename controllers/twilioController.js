@@ -600,7 +600,7 @@ const handleWebSocketConnection = (ws, req) => {
 
     // For romanized Hindi, analyze based on percentage of Hindi words
     // Works with ANY sentence length - no minimum requirement
-    
+
     // Strong Hindi sentence patterns (removed common English words like "delivery")
     const strongHindiPatterns =
       /\b(haan|nahi|kya|kaise|kahan|kab|kyu|kyun|aapko|aapse|hamara|tumhara|mujhe|mere paas|mere liye|aap ka|aap ki|chahiye|karke|karna|hoga|hoega|thik hai|bilkul|zaroor|pahunch|gaya|leke|aaya|boy|main)\b/gi;
@@ -612,7 +612,8 @@ const handleWebSocketConnection = (ws, req) => {
     const mediumMatches = text.match(mediumHindiPatterns) || [];
 
     // Check for English sentence structure indicators
-    const englishPatterns = /\b(have|has|had|is|are|was|were|will|would|can|could|should|do|does|did|the|this|that|these|those|my|your|his|her|its|our|their|i|you|he|she|it|we|they)\b/gi;
+    const englishPatterns =
+      /\b(have|has|had|is|are|was|were|will|would|can|could|should|do|does|did|the|this|that|these|those|my|your|his|her|its|our|their|i|you|he|she|it|we|they)\b/gi;
     const englishMatches = text.match(englishPatterns) || [];
 
     // Calculate Hindi content percentage
@@ -629,7 +630,7 @@ const handleWebSocketConnection = (ws, req) => {
       );
       return "hi";
     }
-    
+
     if (strongMatches.length >= 2) {
       console.log(
         `[LANGUAGE] Hindi detected - Multiple strong Hindi indicators (${strongMatches.length})`,
@@ -728,9 +729,10 @@ const handleWebSocketConnection = (ws, req) => {
         response_language: currentLanguage, // Tell the AI model to respond in this language
         delivery_location: conversationState.user?.deliveryLocation || null, // Include user's delivery location
         // CRITICAL: Enforce strict language requirement
-        language_instruction: currentLanguage === "hi" 
-          ? "IMPORTANT: You MUST respond ONLY in Hindi (Devanagari script). Do NOT use any English words in your response. The user is speaking Hindi, so respond completely in Hindi."
-          : "Respond in English only.",
+        language_instruction:
+          currentLanguage === "hi"
+            ? "IMPORTANT: You MUST respond ONLY in Hindi (Devanagari script). Do NOT use any English words in your response. The user is speaking Hindi, so respond completely in Hindi."
+            : "Respond in English only.",
         // Add Hindi language hints for better understanding
         language_hints:
           currentLanguage === "hi"
@@ -1650,7 +1652,10 @@ const handleWebSocketConnection = (ws, req) => {
 
       // 7️⃣ Hang up logic if end_of_call, call_ending, end_call flag, OR after OTP is shared
       if (
-        (aiResponse && (aiResponse.stage === "end_of_call" || aiResponse.stage === "call_ending" || aiResponse.end_call === true)) ||
+        (aiResponse &&
+          (aiResponse.stage === "end_of_call" ||
+            aiResponse.stage === "call_ending" ||
+            aiResponse.end_call === true)) ||
         conversationState.conversation_stage === "end_of_call" ||
         conversationState.conversation_stage === "call_ending" ||
         (conversationState.conversation_stage === "otp_provided" &&
@@ -1658,7 +1663,7 @@ const handleWebSocketConnection = (ws, req) => {
       ) {
         // Mark that we're ending the call to prevent further processing
         conversationState.isEndingCall = true;
-        
+
         // If we just shared an OTP, say goodbye first
         if (
           conversationState.conversation_stage === "otp_provided" &&
@@ -1743,15 +1748,21 @@ const handleWebSocketConnection = (ws, req) => {
           return; // Exit early to prevent further processing
         } else if (
           conversationState.conversation_stage === "call_ending" ||
-          (aiResponse && (aiResponse.stage === "call_ending" || aiResponse.end_call === true))
+          (aiResponse &&
+            (aiResponse.stage === "call_ending" ||
+              aiResponse.end_call === true))
         ) {
           // AI said goodbye and wants to end call - wait for message to complete
-          console.log("[CALL END] AI ending call with goodbye message - waiting for completion");
-          
+          console.log(
+            "[CALL END] AI ending call with goodbye message - waiting for completion",
+          );
+
           // Wait for the goodbye message to play completely before hanging up
           setTimeout(async () => {
-            console.log("[CALL END] Goodbye message complete - hanging up call now");
-            
+            console.log(
+              "[CALL END] Goodbye message complete - hanging up call now",
+            );
+
             if (conversationState.callSid) {
               await CallLog.findOneAndUpdate(
                 { callSid: conversationState.callSid },
@@ -1816,7 +1827,9 @@ const handleWebSocketConnection = (ws, req) => {
 
           return; // Exit early to prevent further processing
         } else {
-          console.log("[AI] Stage reached: end_of_call → Hanging up call immediately.");
+          console.log(
+            "[AI] Stage reached: end_of_call → Hanging up call immediately.",
+          );
 
           if (conversationState.callSid) {
             await CallLog.findOneAndUpdate(

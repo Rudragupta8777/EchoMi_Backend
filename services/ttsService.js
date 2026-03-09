@@ -32,7 +32,7 @@ class TtsService {
         // Other female options: "vidya", "neha", "ishita", "priya", "manisha", "kavya"
         // Male options: "amit", "rohan", "dev", "rahul", "mohit", "varun", "shubh"
       },
-      pace: 0.90, // Slower pace for clearer delivery and better comprehension
+      pace: 0.9, // Slower pace for clearer delivery and better comprehension
       speech_sample_rate: 8000, // 8kHz for Twilio compatibility
       enable_preprocessing: true, // Enhanced clarity and noise reduction
       // Note: pitch and loudness are NOT supported in bulbul:v3
@@ -111,7 +111,7 @@ class TtsService {
   convertPcmToMulaw(pcm16Buffer) {
     const outputSize = Math.floor(pcm16Buffer.length / 6); // Downsample 24kHz->8kHz
     const mulawBuffer = Buffer.alloc(outputSize);
-    const volumeGain = 0.6; // Reduce volume by 40% to prevent loud output
+    const volumeGain = 0.1; // Reduce volume by 40% to prevent loud output
 
     // Downsample and convert in single pass with volume reduction
     for (let i = 0, j = 0; j < outputSize; i += 6, j++) {
